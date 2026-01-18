@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 这里可以添加其他全局样式 */
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden; /* 防止滚动条出现在全屏布局中 */
+}

@@ -1,0 +1,15 @@
+{
+  "name": "lol-bp-simulator-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "apps/server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=apps/server\" \"npm run dev --workspace=apps/web\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

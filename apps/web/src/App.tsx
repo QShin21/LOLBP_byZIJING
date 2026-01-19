@@ -953,7 +953,7 @@ export default function App() {
 
   let heroIdToSend = hoveredHeroId;
 
-  // ✅ 前端展开 RANDOM：只在 PICK 步骤生效
+  // ✅ 前端展开 RANDOM
   if (hoveredHeroId === SPECIAL_ID_RANDOM && (currentStep?.type === 'PICK' || currentStep?.type === 'BAN')) {
     const pool = HEROES
       .filter((h) => !h.id.startsWith('special_'))               // 排除 special
@@ -990,6 +990,14 @@ export default function App() {
     const data = await res.json();
     window.history.pushState(null, '', `?room=${data.roomId}`);
     setRoomId(data.roomId);
+    // === 新增：自动复制网址并弹窗 ===
+    const roomUrl = `${window.location.origin}/?room=${data.roomId}`;
+    navigator.clipboard.writeText(roomUrl).then(() => {
+      alert(`✅ 房间已创建！\n\n网址已自动复制到剪贴板：\n${roomUrl}`);
+    }).catch(() => {
+      // 如果浏览器不支持自动复制，则只弹窗显示网址
+      alert(`✅ 房间已创建！\n\n请手动复制网址：\n${roomUrl}`);
+    });
   };
 
   const handleJoin = (id: string) => {
@@ -1479,4 +1487,3 @@ export default function App() {
  * .no-scrollbar::-webkit-scrollbar { display: none; }
  * .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
  */
-

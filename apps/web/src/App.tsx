@@ -22,7 +22,7 @@ import {
 
 // ✅ 从 data/heroes.ts 导入（该文件由脚本生成，包含 nameCn / titleCn）
 import { RAW_HEROES as RAW_HEROES_DATA, Hero as DataHero } from './data/heroes';
-
+import { pinyin, match } from 'pinyin-pro';
 // ==========================================
 // MODULE: Types & Constants
 // ==========================================
@@ -174,15 +174,156 @@ const getHeroDisplayName = (h: Hero | null | undefined) => {
 };
 
 // ✅ 搜索支持：英文名 / 中文名 / 中文称号
-const matchesSearch = (h: Hero, term: string) => {
-  if (!term) return true;
-  const t = term.trim().toLowerCase();
-  if (!t) return true;
-  const en = (h.name || '').toLowerCase();
-  const cn = (h.nameCn || '').toLowerCase();
-  const title = (h.titleCn || '').toLowerCase();
-  return en.includes(t) || cn.includes(t) || title.includes(t);
+// --- fuzzy search helpers ---
+const _norm = (s: string) =>
+  (s || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[·'’"“”、,，.。!！?？:：;；()（）\[\]{}<>《》\-_/\\|&]/g, '');
+
+const _hasHan = (s: string) => /[\u4e00-\u9fff]/.test(s);
+
+// Levenshtein distance
+const _lev = (a: string, b: string) => {
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  const dp = new Array(n + 1);
+  for (let j = 0; j <= n; j++) dp[j] = j;
+  for (let i = 1; i <= m; i++) {
+    let prev = dp[0]; // dp[i-1][j-1]
+    dp[0] = i;        // dp[i][0]
+    for (let j = 1; j <= n; j++) {
+      const tmp = dp[j];
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[j] = Math.min(
+        dp[j] + 1,      // deletion
+        dp[j - 1] + 1,  // insertion
+        prev + cost     // substitution
+      );
+      prev = tmp;
+    }
+  }
+  return dp[n];
 };
+
+// fuzzy substring: allow small typos (edit distance) against any substring
+const _fuzzySubstr = (hayRaw: string, needleRaw: string, maxDist: number) => {
+  const hay = _norm(hayRaw);
+  const needle = _norm(needleRaw);
+  if (!needle) return true;
+  if (hay.includes(needle)) return true;
+
+  const n = needle.length;
+  if (!n) return true;
+
+  // try windows with len n-1, n, n+1 (tolerate missing/extra char)
+  const lens = [Math.max(1, n - 1), n, n + 1];
+
+  for (const L of lens) {
+    if (hay.length < L) continue;
+    for (let i = 0; i <= hay.length - L; i++) {
+      const sub = hay.slice(i, i + L);
+      if (_lev(needle, sub) <= maxDist) return true;
+    }
+  }
+  return false;
+};
+
+// threshold by query length
+const _distLimit = (q: string) => {
+  const len = _norm(q).length;
+  if (len <= 3) return 1;
+  if (len <= 6) return 2;
+  return 3;
+};
+
+// cache computed fields per hero id (avoid recalculating pinyin all the time)
+const _SEARCH_CACHE = new Map<string, { cn: string; en: string; py: string; ini: string }>();
+const _getSearchMeta = (h: Hero) => {
+  const cached = _SEARCH_CACHE.get(h.id);
+  if (cached) return cached;
+
+  const cnRaw = `${h.titleCn || ''}${h.nameCn || ''}`;
+  const enRaw = `${h.id} ${h.name || ''} ${h.nameCn || ''} ${h.titleCn || ''}`;
+
+  const pyRaw = pinyin(cnRaw, { toneType: 'none' }); // e.g. "an yi jian mo"
+  const iniRaw = pinyin(cnRaw, { pattern: 'initial', toneType: 'none' }); // e.g. "a y j m" :contentReference[oaicite:2]{index=2}
+
+  const meta = {
+    cn: _norm(cnRaw),
+    en: _norm(enRaw),
+    py: _norm(pyRaw),
+    ini: _norm(iniRaw),
+  };
+  _SEARCH_CACHE.set(h.id, meta);
+  return meta;
+};
+
+// ✅ Enhanced: 中文/拼音/首字母 + 容错模糊
+const matchesSearch = (h: Hero, term: string) => {
+  const raw = (term || '').trim();
+  if (!raw) return true;
+
+  const q = _norm(raw);
+  if (!q) return true;
+
+  const { cn, en, py, ini } = _getSearchMeta(h);
+  const limit = _distLimit(q);
+
+// 1) 直接中文输入：支持“称号/中文名”的模糊 + 同音(拼音)匹配
+  if (_hasHan(raw)) {
+    const qCn = _norm(raw);
+    if (!qCn) return true;
+
+    // ✅ 1) 中文只做“包含”，不做编辑距离（大幅减少误匹配）
+    if (cn.includes(qCn)) return true;
+
+    // ✅ 2) 同音：中文 -> 拼音，但启用条件更严格
+    // - 至少 2 个汉字
+    const hanCount = (raw.match(/[\u4e00-\u9fff]/g) || []).length;
+    if (hanCount < 2) return false;
+
+    const qpy = _norm(pinyin(raw, { toneType: 'none' })); // 朗姆 -> langmu
+    if (!qpy || qpy.length < 4) return false;
+
+    // 只做包含/前缀（不做拼音编辑距离）
+    if (py.includes(qpy) || py.startsWith(qpy)) return true;
+
+    // ✅ 3) 首字母：仅对 2~4 个汉字启用，并且只做 startsWith
+    if (hanCount <= 4) {
+      const qini = _norm(pinyin(raw, { pattern: 'initial', toneType: 'none' })); // 朗姆 -> lm
+      if (qini && qini.length >= 2 && ini.startsWith(qini)) return true;
+    }
+    return false;
+  }
+
+
+
+  // 2) 英文/拼音输入：
+  // 2.1 英文 alias / id / 英文名
+  if (en.includes(q)) return true;
+  if (_fuzzySubstr(en, q, Math.min(2, limit))) return true;
+
+  // 2.2 拼音全拼/首字母（含容错）
+  if (py.includes(q) || ini.includes(q)) return true;
+
+  // pinyin-pro 自带匹配：支持 "zwp" / "zhongwp" / "zhongwenpin" 这种混合规则 :contentReference[oaicite:3]{index=3}
+  const cnText = (h.titleCn || h.nameCn || '');
+  try {
+    const hit = match(cnText, q);
+    if (hit && hit.length) return true;
+  } catch {}
+
+  // 容错：对拼音串做 fuzzy substring（打错 1~2 个字母、漏字也能搜到）
+  if (_fuzzySubstr(py, q, limit)) return true;
+
+  // 首字母一般很短，容错给 1 就够（避免误匹配太多）
+  if (_fuzzySubstr(ini, q, 1)) return true;
+
+  return false;
+};
+
 
 // ==========================================
 // UI COMPONENTS
@@ -411,12 +552,13 @@ const HeroCard = ({ hero, status, onClick, isHovered, isFearlessBanned }: any) =
 
   const clickable = !isFearlessBanned && status === 'AVAILABLE';
 
-  const base = 'relative flex flex-col items-center justify-end p-2 rounded-2xl border transition-all select-none';
+  const base ='relative flex flex-col items-center justify-end p-2 rounded-2xl border transition-all select-none aspect-square';
+
   const glass = 'bg-slate-900/60 backdrop-blur-md';
-  const ring = isHovered ? 'ring-2 ring-yellow-400/70' : '';
+  const ring = isHovered ? 'ring-4 ring-yellow-400 ring-offset-2 ring-offset-slate-900 shadow-[0_0_0_2px_rgba(250,204,21,0.35),0_0_28px_rgba(250,204,21,0.45)]' : '';
   const disabled = 'opacity-35 grayscale cursor-not-allowed border-slate-800/60 bg-slate-950/40';
   const available = isHovered
-    ? 'border-yellow-400/60 shadow-xl shadow-black/30 scale-[1.02]'
+    ? 'border-yellow-400/60 shadow-2xl shadow-black/35 scale-[1.04]'
     : 'border-slate-700/60 hover:border-slate-500/70 hover:bg-slate-800/40';
   const special = 'border-dashed border-slate-700/60 bg-slate-900/40';
 
@@ -578,12 +720,12 @@ const TeamPanel = ({
           const isSwapMode = phase === 'SWAP';
           const allowClick = isSwapMode && hero && canInteract;
 
-          return (
+          return (//左右英雄框
             <div
               key={i}
               onClick={() => (allowClick ? onSwapClick(side, i) : undefined)}
               className={[
-                'h-[66px] w-full rounded-2xl border overflow-hidden relative',
+                'h-[108px] w-full rounded-2xl border overflow-hidden relative',//左右两侧已选英雄框高
                 'bg-slate-900/55 backdrop-blur',
                 isSwapSelected ? 'border-green-400/80 ring-2 ring-green-400/30' : 'border-slate-700/50',
                 allowClick ? 'cursor-pointer hover:bg-slate-800/60 hover:border-slate-500/60' : '',
@@ -596,13 +738,13 @@ const TeamPanel = ({
                 </div>
               )}
 
-              <div className="absolute right-3 top-2 text-[9px] font-black text-slate-400 tracking-widest z-10 bg-black/25 border border-slate-700/40 px-2 py-0.5 rounded-full">
+              <div className="absolute right-3 top-2 text-[15px] font-black text-slate-400 tracking-widest z-10 bg-black/25 border border-slate-700/40 px-2 py-0.5 rounded-full">
                 {POSITION_LABELS[i]}
               </div>
 
               {hero ? (
                 <div className="relative z-10 flex items-center w-full h-full px-3">
-                  <div className="w-11 h-11 rounded-2xl border border-white/10 mr-3 overflow-hidden shadow-md bg-slate-800/40">
+                  <div className="w-16 h-16 rounded-2xl border border-white/10 mr-3 overflow-hidden shadow-md bg-slate-800/40">
                     {imageUrl ? <img src={imageUrl} className="w-full h-full object-cover" /> : <div className="w-full h-full bg-slate-700" />}
                   </div>
                   <div className="min-w-0">
@@ -618,7 +760,7 @@ const TeamPanel = ({
         })}
       </div>
 
-      <div className="relative mt-auto">
+      <div className="relative mt-auto hidden">
         <div className="text-[10px] font-black tracking-widest text-slate-500 mb-2 text-center">BANS</div>
         <div className="flex flex-wrap gap-2 justify-center">
           {banSlots.map((_, i) => {
@@ -630,8 +772,7 @@ const TeamPanel = ({
             return (
               <div
                 key={i}
-                className="w-11 h-11 rounded-2xl bg-slate-900/55 border border-slate-700/60 flex items-center justify-center relative overflow-hidden"
-                title={hero ? `${getHeroDisplayName(hero)}${hero.titleCn ? ` · ${hero.titleCn}` : ''}` : ''}
+                className="w-14 h-14 rounded-2xl bg-slate-900/55 border border-slate-700/60 flex items-center justify-center relative overflow-hidden"
               >
                 {hero && !isNoBan ? (
                   <>
@@ -658,13 +799,13 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
   const redTeamName = game.redSideTeam === 'TEAM_A' ? state.teamA?.name : state.teamB?.name;
   const winnerName = game.winner === 'TEAM_A' ? state.teamA?.name : state.teamB?.name;
 
-  const renderMini = (id: string, kind: 'BAN' | 'PICK') => {
+  const renderMini = (id: string, kind: 'BAN' | 'PICK') => {//结束战报界面
     const hero = getHero(id);
     const img = hero ? getHeroImageUrl(hero) : null;
     const title = hero ? getHeroDisplayName(hero) : '';
     return (
       <div
-        className={`relative ${kind === 'BAN' ? 'w-7 h-7' : 'w-9 h-9'} rounded-xl bg-slate-800/70 border border-slate-700/60 overflow-hidden`}
+        className={`relative ${kind === 'BAN' ? 'w-12 h-12' : 'w-16 h-16'} rounded-lg bg-slate-800/70 border border-slate-700/60 overflow-hidden`}
         title={title}
       >
         {img && <img src={img} className={`${kind === 'BAN' ? 'grayscale opacity-70' : ''} w-full h-full object-cover`} />}
@@ -681,9 +822,9 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
     <div className="bg-slate-900/65 backdrop-blur border border-slate-700/60 rounded-2xl p-4 mb-3 shadow-lg shadow-black/20">
       <div className="flex justify-between items-center mb-3">
         <span className="text-yellow-400 font-black tracking-widest text-sm">GAME {game.gameIdx}</span>
-        <div className="flex items-center gap-2 text-xs font-mono">
-          <span className="text-slate-400">WINNER:</span>
-          <span className={`font-bold ${game.winner === game.blueSideTeam ? 'text-blue-300' : 'text-red-300'}`}>{winnerName}</span>
+        <div className="flex items-center gap-2 text-xm font-mono">
+          <span className="text-slate-300 font-black tracking-wider">WINNER:</span>
+          <span className={`font-black text-base ${game.winner === game.blueSideTeam ? 'text-blue-300' : 'text-red-300'}`}>{winnerName}</span>
         </div>
       </div>
 
@@ -806,11 +947,29 @@ export default function App() {
 
   // Actions
   const handleLock = () => {
-    if (hoveredHeroId) {
-      send('ACTION_SUBMIT', { heroId: hoveredHeroId });
-      setHoveredHeroId(null);
+  if (!hoveredHeroId || !canInteract) return;
+
+  let heroIdToSend = hoveredHeroId;
+
+  // ✅ 前端展开 RANDOM：只在 PICK 步骤生效
+  if (hoveredHeroId === SPECIAL_ID_RANDOM && (currentStep?.type === 'PICK' || currentStep?.type === 'BAN')) {
+    const pool = HEROES
+      .filter((h) => !h.id.startsWith('special_'))               // 排除 special
+      .filter((h) => !usedHeroes.has(h.id))                      // 排除已被 ban/pick
+      .filter((h) => !fearlessBannedHeroes.has(h.id));           // 排除 fearless 禁用
+
+    if (pool.length === 0) {
+      setToast({ msg: '没有可随机的英雄（都已被占用/禁用）', type: 'error' });
+      return;
     }
-  };
+
+    heroIdToSend = pool[Math.floor(Math.random() * pool.length)].id;
+  }
+
+  send('ACTION_SUBMIT', { heroId: heroIdToSend });
+  setHoveredHeroId(null);
+};
+
 
   const handleSwap = (side: Side, index: number) => {
     if (isSpectator || state?.status !== 'RUNNING' || state?.paused) return;
@@ -921,7 +1080,7 @@ export default function App() {
             </div>
           )}
 
-          <div className="hidden md:flex bg-slate-800/60 px-3 py-1.5 rounded-full border border-slate-700/60 text-xs font-mono">
+          <div className="hidden md:flex bg-slate-800/60 px-6 py-2.5 rounded-full border border-slate-700/60 text-base font-mono shadow-lg">
             <span className={state.teamA.wins > state.teamB.wins ? 'text-yellow-300' : 'text-white'}>{state.teamA.name} {state.teamA.wins || 0}</span>
             <span className="mx-2 text-slate-500">-</span>
             <span className={state.teamB.wins > state.teamA.wins ? 'text-yellow-300' : 'text-white'}>{state.teamB.wins} {state.teamB.name}</span>
@@ -1074,91 +1233,154 @@ export default function App() {
 
           {state.status === 'RUNNING' && state.phase === 'DRAFT' && (
             <>
-              <div className="h-16 border-b border-slate-800/70 bg-slate-900/35 backdrop-blur flex items-center px-4 gap-3">
-                <div className="flex items-center gap-2 bg-slate-950/60 border border-slate-700/60 rounded-2xl px-3 py-2 w-[320px] max-w-[60vw]">
-                  <Search size={16} className="text-slate-500" />
-                  <input
-                    type="text"
-                    placeholder="Search... (中文/英文/称号)"
-                    className="bg-transparent outline-none text-sm text-white placeholder:text-slate-600 w-full"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                  />
-                </div>
+              <div className="flex-1 flex items-start justify-center p-6 overflow-hidden">
+                <div className="w-full max-w-6xl">
+                  {/* ===== White Panel (like reference) ===== */}
+                  <div className="bg-slate-100 border border-slate-300 rounded-lg shadow-xl overflow-hidden">
+                    {/* Top tabs + search */}
+                    <div className="flex items-stretch bg-white border-b border-slate-300">
+                      <div className="flex">
+                        {[
+                          ['ALL', '全部'],
+                          ['TOP', '上单'],
+                          ['JG', '打野'],
+                          ['MID', '中单'],
+                          ['BOT', '下路'],
+                          ['SUP', '辅助'],
+                        ].map(([val, label]) => {
+                          const active = roleFilter === val;
+                          return (
+                            <button
+                              key={val}
+                              onClick={() => setRoleFilter(val)}
+                              className={`relative px-6 py-3 font-bold border-r border-slate-200 ${
+                                active ? 'bg-white text-slate-900' : 'bg-slate-50 text-slate-500 hover:bg-white'
+                              }`}
+                            >
+                              {label}
+                              {active && (
+                                <span className="absolute left-5 -bottom-2 w-0 h-0 border-l-8 border-r-8 border-t-8 border-l-transparent border-r-transparent border-t-white" />
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
 
-                <div className="flex gap-1 overflow-x-auto no-scrollbar">
-                  {['ALL', 'TOP', 'JG', 'MID', 'BOT', 'SUP'].map((r) => (
-                    <button
-                      key={r}
-                      onClick={() => setRoleFilter(r)}
-                      className={`px-3 py-2 rounded-2xl text-[10px] font-black border transition-all ${
-                        roleFilter === r
-                          ? 'bg-slate-800/80 text-white border-slate-600/70 shadow'
-                          : 'text-slate-400 border-slate-800/60 hover:text-slate-200 hover:border-slate-600/60 hover:bg-slate-800/30'
-                      }`}
-                    >
-                      {r}
-                    </button>
-                  ))}
-                </div>
+                      <div className="ml-auto flex items-center gap-3 px-4">
+                        <input
+                          type="text"
+                          placeholder="搜索..."
+                          className="w-80 max-w-[40vw] bg-white border border-slate-300 rounded px-3 py-2 text-slate-800 placeholder:text-slate-400 focus:outline-none"
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                        />
+                        <Search className="text-slate-500" />
+                      </div>
+                    </div>
 
-                <div className="ml-auto hidden lg:flex items-center text-[11px] text-slate-500">
-                  Hover to preview • Click to select • Lock to confirm
-                </div>
-              </div>
+                    {/* Hero pool area (smaller frame, scroll inside) */}
+                    <div className="bg-slate-200/60 p-4">
+                      <div className="bg-white border border-slate-300 rounded-md p-5 h-[520px] overflow-y-auto">
+                        <div className="grid grid-cols-10 gap-4">
+                          {filteredHeroes.map((h) => {
+                            const used = usedHeroes.has(h.id);
+                            const isFearlessBanned = fearlessBannedHeroes.has(h.id);
+                            const status = h.id.startsWith('special')
+                              ? (currentStep?.type === 'BAN'
+                                  ? (h.id === SPECIAL_ID_NONE || h.id === SPECIAL_ID_RANDOM ? 'AVAILABLE' : 'DISABLED')
+                                  : currentStep?.type === 'PICK'
+                                    ? (h.id === SPECIAL_ID_RANDOM ? 'AVAILABLE' : 'DISABLED')
+                                    : 'DISABLED')
+                              : used
+                                ? 'DISABLED'
+                                : 'AVAILABLE';
 
-              <div className="flex-1 overflow-y-auto p-5 md:p-6 grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-9 gap-2.5 content-start min-h-0">
-                {filteredHeroes.map((h) => {
-                  const used = usedHeroes.has(h.id);
-                  const isFearlessBanned = fearlessBannedHeroes.has(h.id);
-                  const status =
-                    h.id.startsWith('special')
-                      ? currentStep?.type === 'BAN' && h.id === SPECIAL_ID_NONE
-                        ? 'AVAILABLE'
-                        : currentStep?.type === 'PICK' && h.id === SPECIAL_ID_RANDOM
-                          ? 'AVAILABLE'
-                          : 'DISABLED'
-                      : used
-                        ? 'DISABLED'
-                        : 'AVAILABLE';
-
-                  return (
-                    <HeroCard
-                      key={h.id}
-                      hero={h}
-                      status={status}
-                      isHovered={hoveredHeroId === h.id}
-                      onClick={() => {
-                        if (canInteract) setHoveredHeroId(h.id);
-                      }}
-                      isFearlessBanned={isFearlessBanned}
-                    />
-                  );
-                })}
-              </div>
-
-              <div className="h-20 border-t border-slate-800/70 bg-slate-900/35 backdrop-blur flex items-center justify-center gap-4 px-4">
-                {getHero(hoveredHeroId) && (
-                  <div className="hidden md:flex items-center gap-3 bg-slate-950/60 border border-slate-700/60 rounded-2xl px-4 py-2">
-                    <div className="w-2 h-2 rounded-full bg-yellow-500 shadow" />
-                    <div className="text-white font-black">
-                      {getHeroDisplayName(getHero(hoveredHeroId) || null)}
-                      {getHero(hoveredHeroId)?.titleCn ? (
-                        <span className="text-slate-400 font-normal ml-2">· {getHero(hoveredHeroId)?.nameCn}</span>
-                      ) : null}
-                      <span className="text-slate-500 font-normal ml-2">({getHero(hoveredHeroId)?.name})</span>
+                            return (
+                              <HeroCard
+                                key={h.id}
+                                hero={h}
+                                status={status}
+                                isHovered={hoveredHeroId === h.id}
+                                onClick={() => { if (canInteract) setHoveredHeroId(h.id); }}
+                                isFearlessBanned={isFearlessBanned}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
                   </div>
-                )}
 
-                <button
-                  onClick={handleLock}
-                  disabled={!hoveredHeroId || !canInteract}
-                  className="bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 disabled:opacity-50 text-white px-10 py-3 rounded-2xl font-black shadow-xl shadow-yellow-900/15 transition-transform hover:scale-[1.01] active:scale-[0.99]"
-                >
-                  LOCK IN
-                </button>
+                  {/* ===== Bottom bar: big bans + big confirm button (like reference) ===== */}
+                  <div className="mt-5 flex items-center justify-between gap-6">
+                    {/* Blue bans */}
+                    <div className="flex gap-3">
+                      {(state.blueBans || Array(5).fill(null)).slice(0,5).map((heroId, i) => {
+                        const hero = heroId ? getHero(heroId) : null;
+                        const img = hero ? getHeroImageUrl(hero) : null;
+                        const isNoBan = heroId === SPECIAL_ID_NONE;
+
+                        return (
+                          <div key={i} className="w-16 h-16 bg-slate-300 rounded border border-slate-400 overflow-hidden relative flex items-center justify-center">
+                            {isNoBan ? (
+                              <XCircle className="w-9 h-9 text-slate-600" />
+                            ) : img ? (
+                              <>
+                                <img src={img} className="w-full h-full object-cover grayscale opacity-80" />
+                                <Ban className="absolute w-7 h-7 text-red-600 drop-shadow" />
+                              </>
+                            ) : (
+                              <div className="w-full h-full bg-slate-300" />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Confirm button */}
+                    <div className="flex flex-col items-center gap-2">
+                      {getHero(hoveredHeroId) && (
+                        <div className="text-slate-200 font-black">
+                          {getHeroDisplayName(getHero(hoveredHeroId) || null)}
+                        </div>
+                      )}
+                      <button
+                        onClick={handleLock}
+                        disabled={!hoveredHeroId || !canInteract}
+                        className="w-[360px] h-20 bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-slate-900 text-3xl font-black shadow-2xl
+                                  [clip-path:polygon(6%_0,94%_0,100%_100%,0_100%)]"
+                      >
+                        确定
+                      </button>
+                    </div>
+
+                    {/* Red bans */}
+                    <div className="flex gap-3">
+                      {(state.redBans || Array(5).fill(null)).slice(0,5).reverse().map((heroId, i) => {
+                        const hero = heroId ? getHero(heroId) : null;
+                        const img = hero ? getHeroImageUrl(hero) : null;
+                        const isNoBan = heroId === SPECIAL_ID_NONE;
+
+                        return (
+                          <div key={i} className="w-16 h-16 bg-slate-300 rounded border border-slate-400 overflow-hidden relative flex items-center justify-center">
+                            {isNoBan ? (
+                              <XCircle className="w-9 h-9 text-slate-600" />
+                            ) : img ? (
+                              <>
+                                <img src={img} className="w-full h-full object-cover grayscale opacity-80" />
+                                <Ban className="absolute w-7 h-7 text-red-600 drop-shadow" />
+                              </>
+                            ) : (
+                              <div className="w-full h-full bg-slate-300" />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
               </div>
+
             </>
           )}
 
@@ -1168,19 +1390,21 @@ export default function App() {
                 <h2 className="text-4xl font-black text-white italic mb-4">SWAP PHASE</h2>
                 <p className="text-slate-400 mb-8">Click picks to swap positions, then confirm.</p>
                 {canInteract && (
-                  <button
-                    onClick={() => send('ACTION_SUBMIT', { type: 'FINISH_SWAP' })}
-                    className="bg-green-600 hover:bg-green-500 text-white px-10 py-3 rounded-2xl font-black flex items-center gap-2 shadow-xl shadow-green-900/15 transition-transform hover:scale-[1.01] active:scale-[0.99]"
-                  >
-                    <Check /> CONFIRM SWAPS
-                  </button>
+                  <div className="w-full flex justify-center">
+                    <button
+                      onClick={() => send('ACTION_SUBMIT', { type: 'FINISH_SWAP' })}
+                      className="bg-green-600 text-white px-10 py-4 rounded-2xl font-black flex items-center gap-2 shadow-xl"
+                    >
+                      <Check /> CONFIRM SWAPS
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
           )}
 
           {state.status === 'FINISHED' && (
-            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/85 backdrop-blur-sm overflow-y-auto p-8">
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-start bg-slate-950/85 backdrop-blur-sm overflow-y-auto pt-10 pb-12 px-6">
               <div className="w-full max-w-5xl">
                 <div className="bg-slate-900/70 border border-slate-700/60 rounded-3xl p-8 shadow-2xl">
                   <h2 className="text-4xl font-black text-yellow-400 italic mb-6 text-center">GAME COMPLETED</h2>

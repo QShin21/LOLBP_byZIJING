@@ -874,7 +874,8 @@ export default function App() {
   // WS Connection
   useEffect(() => {
     if (!roomId) return;
-    const ws = new WebSocket(`ws://localhost:8080?room=${roomId}`);
+    //const ws = new WebSocket(`ws://localhost:8080?room=${roomId}`);
+    const ws = new WebSocket(`ws://zijing.yejiaxin.online:8080?room=${roomId}`);
     wsRef.current = ws;
 
     ws.onopen = () => setIsConnected(true);
@@ -886,7 +887,8 @@ export default function App() {
         if (msg.type === 'STATE_SYNC') {
           const ns = msg.payload as DraftState;
           if (lastSeenSeq > 0 && ns.lastActionSeq > lastSeenSeq + 1) {
-            const res = await fetch(`http://localhost:8080/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
+            //const res = await fetch(`http://localhost:8080/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
+            const res = await fetch(`http://zijing.yejiaxin.online:8080/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
             const data = await res.json();
             if (data.actions?.length) setMissedActions((prev) => [...prev, ...data.actions]);
           }
@@ -983,7 +985,8 @@ export default function App() {
   };
 
   const handleCreate = async (cfg: any) => {
-    const res = await fetch('http://localhost:8080/rooms', { method: 'POST', body: JSON.stringify(cfg) });
+    //const res = await fetch('http://localhost:8080/rooms', { method: 'POST', body: JSON.stringify(cfg) });
+    const res = await fetch('http://zijing.yejiaxin.online:8080/rooms', { method: 'POST', body: JSON.stringify(cfg) });
     const data = await res.json();
     window.history.pushState(null, '', `?room=${data.roomId}`);
     setRoomId(data.roomId);

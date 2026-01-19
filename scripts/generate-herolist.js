@@ -7,7 +7,8 @@ const https = require('https');
  * 包含：英文名(alias), 中文称号(name), 中文名(title), 角色标签(roles)
  */
 const DATA_SOURCE_URL = 'https://game.gtimg.cn/images/lol/act/img/js/heroList/hero_list.js';
-const OUTPUT_FILE = path.join(__dirname, 'herolist.ts');
+// 修改点：路径改为指向 apps/web/src/data/heroes.ts
+const OUTPUT_FILE = path.join(__dirname, '../apps/web/src/data/heroes.ts');
 
 /**
  * ID 规范化

@@ -862,7 +862,7 @@ export default function App() {
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
 
   const [lastSeenSeq, setLastSeenSeq] = useState<number>(0);
-  const [missedActions, setMissedActions] = useState<DraftAction[]>([]);
+  const [, setMissedActions] = useState<DraftAction[]>([]);
 
   useEffect(() => {
     if (toast) {
@@ -1479,3 +1479,4 @@ export default function App() {
  * .no-scrollbar::-webkit-scrollbar { display: none; }
  * .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
  */
+

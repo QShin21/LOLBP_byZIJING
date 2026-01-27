@@ -8,6 +8,7 @@ import {
   HelpCircle,
   XCircle,
   Check,
+  Undo2,
   Eye,
   UserCog,
   Play,
@@ -87,6 +88,11 @@ interface DraftState {
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
+  stepDurationMs: number;
+  hasReferee: boolean;
+  separateSidePick: boolean;
+  draftSides: { [key in TeamId]: Side | null };
+  pendingApproval?: { type: 'UNDO' | 'RESET'; requestedBy: TeamId } | null;
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number;
@@ -171,6 +177,19 @@ const getHero = (id: string | null) => HEROES.find((h) => h.id === id);
 const getHeroDisplayName = (h: Hero | null | undefined) => {
   if (!h) return '';
   return h.titleCn || h.nameCn || h.name;
+};
+
+const normalizeDraftState = (incoming: DraftState): DraftState => {
+  const safeSides = incoming.sides ?? { TEAM_A: null, TEAM_B: null };
+  return {
+    ...incoming,
+    stepDurationMs: typeof incoming.stepDurationMs === 'number' ? incoming.stepDurationMs : 30000,
+    hasReferee: incoming.hasReferee ?? true,
+    separateSidePick: incoming.separateSidePick ?? false,
+    sides: safeSides,
+    draftSides: incoming.draftSides ?? safeSides,
+    pendingApproval: incoming.pendingApproval ?? null,
+  };
 };
 
 // ✅ 搜索支持：英文名 / 中文名 / 中文称号
@@ -331,8 +350,23 @@ const matchesSearch = (h: Hero, term: string) => {
 
 const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: (id: string) => void }) => {
   const [activeTab, setActiveTab] = useState<'CREATE' | 'JOIN'>('CREATE');
-  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' });
+  const [config, setConfig] = useState({
+    matchTitle: '',
+    teamA: 'T1',
+    teamB: 'GEN',
+    seriesMode: 'BO3',
+    draftMode: 'STANDARD',
+    stepDurationMs: 30000,
+    hasReferee: true,
+    separateSidePick: false,
+  });
   const [joinId, setJoinId] = useState('');
+  const timeOptions = [
+    { label: '30s', value: 30000 },
+    { label: '60s', value: 60000 },
+    { label: '90s', value: 90000 },
+    { label: '无上限', value: 0 },
+  ];
 
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative overflow-hidden">
@@ -340,14 +374,6 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
       <div className="absolute top-0 left-0 w-full h-full opacity-10 bg-[url('https://lol.qq.com/act/a20220120lpl/img/bg.jpg')] bg-cover bg-center" />
 
       <div className="max-w-xl w-full bg-slate-900/75 backdrop-blur-2xl border border-slate-700/70 rounded-3xl p-8 shadow-2xl z-10">
-        <div className="text-center mb-8">
-          <div className="mx-auto w-16 h-16 rounded-2xl bg-gradient-to-br from-yellow-500/25 to-slate-800/30 border border-slate-700/60 flex items-center justify-center shadow-lg">
-            <Sword size={32} className="text-yellow-400" />
-          </div>
-          <h1 className="mt-5 text-4xl font-black text-white italic tracking-tight">BP SIMULATOR</h1>
-          <p className="text-slate-400 mt-1">Tournament Edition</p>
-        </div>
-
         <div className="flex gap-2 mb-6 bg-slate-800/70 p-1 rounded-xl border border-slate-700/60">
           <button
             onClick={() => setActiveTab('CREATE')}
@@ -455,6 +481,86 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
               </div>
             </div>
 
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Step Timer</label>
+              <div className="grid grid-cols-4 gap-2">
+                {timeOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => setConfig({ ...config, stepDurationMs: option.value })}
+                    className={`py-2.5 rounded-xl border font-bold transition-all ${
+                      config.stepDurationMs === option.value
+                        ? 'bg-emerald-600/90 border-emerald-600 text-white shadow-md shadow-emerald-900/20'
+                        : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2">
+                选择每步倒计时时长，或关闭计时限制。
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">裁判模式</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setConfig({ ...config, hasReferee: true })}
+                  className={`py-2.5 rounded-xl border font-bold transition-all ${
+                    config.hasReferee
+                      ? 'bg-purple-600/90 border-purple-600 text-white shadow-md shadow-purple-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  有裁判
+                </button>
+                <button
+                  onClick={() => setConfig({ ...config, hasReferee: false })}
+                  className={`py-2.5 rounded-xl border font-bold transition-all ${
+                    !config.hasReferee
+                      ? 'bg-purple-600/90 border-purple-600 text-white shadow-md shadow-purple-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  无裁判
+                </button>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2">
+                无裁判模式下，双方准备后自动开始，撤回/重开需对方同意。
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">选边选图是否分离</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setConfig({ ...config, separateSidePick: false })}
+                  className={`py-2.5 rounded-xl border font-bold transition-all ${
+                    !config.separateSidePick
+                      ? 'bg-indigo-600/90 border-indigo-600 text-white shadow-md shadow-indigo-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  否
+                </button>
+                <button
+                  onClick={() => setConfig({ ...config, separateSidePick: true })}
+                  className={`py-2.5 rounded-xl border font-bold transition-all ${
+                    config.separateSidePick
+                      ? 'bg-indigo-600/90 border-indigo-600 text-white shadow-md shadow-indigo-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  是
+                </button>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2">
+                分离后可独立选择地图蓝色方与优先禁选队伍。
+              </div>
+            </div>
+
             <button
               onClick={() => onCreate(config)}
               className="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-white py-3.5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-yellow-900/15 transition-transform hover:scale-[1.01] active:scale-[0.99]"
@@ -523,12 +629,14 @@ const RoleSelectionModal = ({ state, onSelect }: { state: DraftState; onSelect: 
             <span className="text-[10px] text-slate-500 font-bold tracking-widest">TEAM B</span>
           </button>
 
-          <button
-            onClick={() => onSelect('REFEREE')}
-            className="h-20 bg-yellow-950/20 hover:bg-yellow-900/25 border border-yellow-700/60 hover:border-yellow-500/70 rounded-2xl flex items-center justify-center gap-2 text-yellow-400 font-black transition-all"
-          >
-            <UserCog /> REFEREE
-          </button>
+          {state.hasReferee && (
+            <button
+              onClick={() => onSelect('REFEREE')}
+              className="h-20 bg-yellow-950/20 hover:bg-yellow-900/25 border border-yellow-700/60 hover:border-yellow-500/70 rounded-2xl flex items-center justify-center gap-2 text-yellow-400 font-black transition-all"
+            >
+              <UserCog /> REFEREE
+            </button>
+          )}
 
           <button
             onClick={() => onSelect('SPECTATOR')}
@@ -631,6 +739,7 @@ const HeroCard = ({ hero, status, onClick, isHovered, isFearlessBanned }: any) =
 
 const TeamPanel = ({
   side,
+  draftSide,
   bans,
   picks,
   active,
@@ -716,14 +825,14 @@ const TeamPanel = ({
           const heroId = safePicks[i];
           const hero = heroId ? getHero(heroId) : null;
           const imageUrl = hero ? getHeroImageUrl(hero) : null;
-          const isSwapSelected = phase === 'SWAP' && swapSelection?.side === side && swapSelection?.index === i;
-          const isSwapMode = phase === 'SWAP';
-          const allowClick = isSwapMode && hero && canInteract;
+  const isSwapSelected = phase === 'SWAP' && swapSelection?.side === draftSide && swapSelection?.index === i;
+  const isSwapMode = phase === 'SWAP';
+  const allowClick = isSwapMode && hero && canInteract;
 
-          return (//左右英雄框
-            <div
-              key={i}
-              onClick={() => (allowClick ? onSwapClick(side, i) : undefined)}
+  return (//左右英雄框
+    <div
+      key={i}
+      onClick={() => (allowClick && draftSide ? onSwapClick(draftSide, i) : undefined)}
               className={[
                 'h-[108px] w-full rounded-2xl border overflow-hidden relative',//左右两侧已选英雄框高
                 'bg-slate-900/55 backdrop-blur',
@@ -860,6 +969,8 @@ export default function App() {
   const [roleFilter, setRoleFilter] = useState<string>('ALL');
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
+  const [mapBlueTeamChoice, setMapBlueTeamChoice] = useState<TeamId | null>(null);
+  const [priorityTeamChoice, setPriorityTeamChoice] = useState<TeamId | null>(null);
 
   const [lastSeenSeq, setLastSeenSeq] = useState<number>(0);
   const [, setMissedActions] = useState<DraftAction[]>([]);
@@ -885,7 +996,7 @@ export default function App() {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'STATE_SYNC') {
-          const ns = msg.payload as DraftState;
+          const ns = normalizeDraftState(msg.payload as DraftState);
           if (lastSeenSeq > 0 && ns.lastActionSeq > lastSeenSeq + 1) {
             //const res = await fetch(`http://localhost:8080/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
             const res = await fetch(`https://zijing.yejiaxin.online/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
@@ -923,11 +1034,36 @@ export default function App() {
     [searchTerm, roleFilter]
   );
 
+  const getDraftSideForTeam = (teamId: TeamId | null) => {
+    if (!state || !teamId) return null;
+    return state.draftSides?.[teamId] ?? state.sides[teamId];
+  };
+
+  const getTeamDraftInfo = (teamId: TeamId | null) => {
+    if (!state || !teamId) return { bans: [], picks: [], ready: false, draftSide: null as Side | null };
+    const draftSide = getDraftSideForTeam(teamId);
+    if (draftSide === 'BLUE') {
+      return { bans: state.blueBans, picks: state.bluePicks, ready: state.blueReady, draftSide };
+    }
+    if (draftSide === 'RED') {
+      return { bans: state.redBans, picks: state.redPicks, ready: state.redReady, draftSide };
+    }
+    return { bans: [], picks: [], ready: false, draftSide: null };
+  };
+
   // Derived Info
   const myTeamId = userRole === 'TEAM_A' || userRole === 'TEAM_B' ? userRole : null;
-  const mySide = state && myTeamId ? state.sides[myTeamId] : null;
+  const mySide = getDraftSideForTeam(myTeamId);
   const isReferee = userRole === 'REFEREE';
   const isSpectator = userRole === 'SPECTATOR';
+  const hasUnlimitedTimer = (state?.stepDurationMs ?? 0) <= 0;
+  const hasReferee = state?.hasReferee ?? true;
+  const separateSidePick = state?.separateSidePick ?? false;
+  const isTeamUser = userRole === 'TEAM_A' || userRole === 'TEAM_B';
+  const pendingApproval = state?.pendingApproval ?? null;
+  const needsApprovalResponse =
+    !hasReferee && pendingApproval && isTeamUser && userRole !== pendingApproval.requestedBy;
+  const pendingApprovalLabel = pendingApproval?.type === 'UNDO' ? '撤回' : '重开';
 
   const canInteract = useMemo(() => {
     if (!state || state.paused || state.status !== 'RUNNING') return false;
@@ -943,9 +1079,13 @@ export default function App() {
       else setTimeLeft(0);
       return;
     }
+    if ((state.stepDurationMs ?? 0) <= 0) {
+      setTimeLeft(0);
+      return;
+    }
     const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - Date.now()) / 1000))), 200);
     return () => clearInterval(i);
-  }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt]);
+  }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt, state?.stepDurationMs]);
 
   // Actions
   const handleLock = () => {
@@ -984,6 +1124,19 @@ export default function App() {
     } else setSwapSelection(null);
   };
 
+  const requestTeamApproval = (requestType: 'UNDO' | 'RESET') => {
+    if (!state || hasReferee || !isTeamUser) return;
+    if (state.pendingApproval) {
+      setToast({ msg: '已有待确认请求，请等待对方响应。', type: 'info' });
+      return;
+    }
+    send('ACTION_REQUEST', { requestType });
+    setToast({
+      msg: requestType === 'UNDO' ? '已申请撤回，等待对方确认。' : '已申请重开，等待对方确认。',
+      type: 'info',
+    });
+  };
+
   const handleCreate = async (cfg: any) => {
     //const res = await fetch('http://localhost:8080/rooms', { method: 'POST', body: JSON.stringify(cfg) });
     const res = await fetch('https://zijing.yejiaxin.online/rooms', { method: 'POST', body: JSON.stringify(cfg) });
@@ -1018,6 +1171,16 @@ export default function App() {
     send('ACTION_SUBMIT', { type: 'SET_SIDES', sideForA: selectedSide });
   };
 
+  const handleSeparateSelection = (type: 'MAP_BLUE' | 'PRIORITY', teamId: TeamId) => {
+    const nextMapBlueTeam = type === 'MAP_BLUE' ? teamId : mapBlueTeamChoice;
+    const nextPriorityTeam = type === 'PRIORITY' ? teamId : priorityTeamChoice;
+    if (type === 'MAP_BLUE') setMapBlueTeamChoice(teamId);
+    if (type === 'PRIORITY') setPriorityTeamChoice(teamId);
+    if (nextMapBlueTeam && nextPriorityTeam) {
+      send('ACTION_SUBMIT', { type: 'SET_SIDES', mapBlueTeam: nextMapBlueTeam, priorityTeam: nextPriorityTeam });
+    }
+  };
+
   const handleReportResult = (winner: TeamId) => send('ACTION_SUBMIT', { type: 'REPORT_RESULT', winner });
 
   if (!roomId) return <Lobby onCreate={handleCreate} onJoin={handleJoin} />;
@@ -1034,6 +1197,13 @@ export default function App() {
 
   const bothSidesSet = state.sides.TEAM_A && state.sides.TEAM_B;
 
+  useEffect(() => {
+    if (!state || state.status !== 'NOT_STARTED' || bothSidesSet) {
+      setMapBlueTeamChoice(null);
+      setPriorityTeamChoice(null);
+    }
+  }, [state?.status, bothSidesSet]);
+
   const getTeamData = (teamId: string | null) => {
     if (teamId === 'TEAM_A') return state.teamA;
     if (teamId === 'TEAM_B') return state.teamB;
@@ -1045,6 +1215,8 @@ export default function App() {
 
   const blueData = getTeamData(teamOnBlueId);
   const redData = getTeamData(teamOnRedId);
+  const blueDraftInfo = getTeamDraftInfo(teamOnBlueId);
+  const redDraftInfo = getTeamDraftInfo(teamOnRedId);
 
   const isBlueUser = userRole === 'REFEREE' || (teamOnBlueId && userRole === teamOnBlueId);
   const isRedUser = userRole === 'REFEREE' || (teamOnRedId && userRole === teamOnRedId);
@@ -1066,6 +1238,32 @@ export default function App() {
       {toast && (
         <div className="fixed top-24 left-1/2 -translate-x-1/2 bg-red-600 px-6 py-3 rounded-full shadow-xl z-50 animate-bounce font-black">
           {toast.msg}
+        </div>
+      )}
+      {needsApprovalResponse && pendingApproval && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900/85 backdrop-blur-2xl border border-slate-700/70 p-6 rounded-3xl max-w-md w-full shadow-2xl">
+            <div className="text-center mb-5">
+              <h2 className="text-2xl font-black text-white">对方申请{pendingApprovalLabel}</h2>
+              <p className="text-slate-400 text-sm mt-2">
+                {pendingApproval.requestedBy === 'TEAM_A' ? state?.teamA.name : state?.teamB.name} 请求{pendingApprovalLabel}当前进程。
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => send('ACTION_REQUEST_RESPONSE', { approved: true, requestType: pendingApproval.type, requestedBy: pendingApproval.requestedBy })}
+                className="flex-1 py-2.5 rounded-xl bg-green-600/90 hover:bg-green-500 text-white font-black flex items-center justify-center gap-2"
+              >
+                <Check size={18} /> 同意
+              </button>
+              <button
+                onClick={() => send('ACTION_REQUEST_RESPONSE', { approved: false, requestType: pendingApproval.type, requestedBy: pendingApproval.requestedBy })}
+                className="flex-1 py-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 font-black flex items-center justify-center gap-2"
+              >
+                <XCircle size={18} /> 拒绝
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {!userRole && <RoleSelectionModal state={state} onSelect={setUserRole} />}
@@ -1121,14 +1319,14 @@ export default function App() {
                     {currentStep.side} {currentStep.type}
                   </span>
                   <span className="text-slate-600">|</span>
-                  <span className="text-slate-100">{timeLeft}s</span>
+                  <span className="text-slate-100">{hasUnlimitedTimer ? '∞' : `${timeLeft}s`}</span>
                 </div>
               )
             ) : state.phase === 'SWAP' ? (
               <div className="text-xl font-black flex gap-2 text-yellow-400 animate-pulse">
                 <span>SWAP PHASE</span>
                 <span className="text-slate-600">|</span>
-                <span>{timeLeft}s</span>
+                <span>{hasUnlimitedTimer ? '∞' : `${timeLeft}s`}</span>
               </div>
             ) : null
           )}
@@ -1173,6 +1371,27 @@ export default function App() {
             </div>
           )}
 
+          {!hasReferee && isTeamUser && (
+            <div className="flex bg-slate-800/60 rounded-2xl p-1 border border-slate-700/60">
+              <button
+                onClick={() => requestTeamApproval('UNDO')}
+                disabled={!!pendingApproval}
+                className="p-2 hover:text-yellow-400 disabled:opacity-40 transition-colors"
+                title="请求撤回"
+              >
+                <Undo2 size={16} />
+              </button>
+              <button
+                onClick={() => requestTeamApproval('RESET')}
+                disabled={!!pendingApproval}
+                className="p-2 hover:text-white disabled:opacity-40 transition-colors"
+                title="请求重开"
+              >
+                <RotateCcw size={16} />
+              </button>
+            </div>
+          )}
+
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800/60 border border-slate-700/60 text-xs font-black text-slate-300">
             {userRole === 'TEAM_A' ? state.teamA.name : userRole === 'TEAM_B' ? state.teamB.name : userRole}
           </div>
@@ -1190,15 +1409,20 @@ export default function App() {
       <main className="flex-1 flex overflow-hidden relative z-0">
         <TeamPanel
           side="BLUE"
-          bans={state.blueBans}
-          picks={state.bluePicks}
-          active={state.status === 'RUNNING' && currentStep?.side === 'BLUE'}
+          draftSide={blueDraftInfo.draftSide}
+          bans={blueDraftInfo.bans}
+          picks={blueDraftInfo.picks}
+          active={state.status === 'RUNNING' && currentStep?.side === blueDraftInfo.draftSide}
           teamName={blueData ? blueData.name : 'TBD'}
           teamWins={blueData ? blueData.wins : 0}
           status={state.status}
-          isReady={state.blueReady}
+          isReady={blueDraftInfo.ready}
           canControl={isBlueUser}
-          onToggleReady={canInteract || (bothSidesSet && isBlueUser) ? () => send('TOGGLE_READY', { side: 'BLUE' }) : undefined}
+          onToggleReady={
+            canInteract || (bothSidesSet && isBlueUser && blueDraftInfo.draftSide)
+              ? () => send('TOGGLE_READY', { side: blueDraftInfo.draftSide })
+              : undefined
+          }
           swapSelection={swapSelection}
           onSwapClick={handleSwap}
           phase={state.phase}
@@ -1217,25 +1441,93 @@ export default function App() {
                 </div>
 
                 {(isReferee || userRole === state.nextSideSelector) && (
-                  <div className="flex flex-col items-center gap-6">
-                    <div className="text-xl font-black text-blue-300">这一局的蓝色方是：</div>
-                    <div className="flex flex-col md:flex-row gap-5 md:gap-10 w-full justify-center">
-                      <button onClick={() => handleSideSelection('BLUE')} className="group flex-1">
-                        <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
-                          <span className="text-3xl font-black text-white uppercase">{state.teamA.name}</span>
-                          <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
+                  <div className="flex flex-col items-center gap-8">
+                    {!separateSidePick ? (
+                      <>
+                        <div className="text-xl font-black text-blue-300">这一局的蓝色方是：</div>
+                        <div className="flex flex-col md:flex-row gap-5 md:gap-10 w-full justify-center">
+                          <button onClick={() => handleSideSelection('BLUE')} className="group flex-1">
+                            <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
+                              <span className="text-3xl font-black text-white uppercase">{state.teamA.name}</span>
+                              <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
+                            </div>
+                          </button>
+                          <button onClick={() => handleSideSelection('RED')} className="group flex-1">
+                            <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
+                              <span className="text-3xl font-black text-white uppercase">{state.teamB.name}</span>
+                              <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
+                            </div>
+                          </button>
                         </div>
-                      </button>
-                      <button onClick={() => handleSideSelection('RED')} className="group flex-1">
-                        <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
-                          <span className="text-3xl font-black text-white uppercase">{state.teamB.name}</span>
-                          <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
+                        <div className="text-[11px] text-slate-500 text-center">
+                          Tip: Click the team who will be BLUE side.
                         </div>
-                      </button>
-                    </div>
-                    <div className="text-[11px] text-slate-500 text-center">
-                      Tip: Click the team who will be BLUE side.
-                    </div>
+                      </>
+                    ) : (
+                      <div className="w-full space-y-8">
+                        <div className="space-y-4">
+                          <div className="text-xl font-black text-blue-300">这一局的地图蓝色方是：</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                            <button onClick={() => handleSeparateSelection('MAP_BLUE', 'TEAM_A')} className="group">
+                              <div
+                                className={`w-full h-28 border-2 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all shadow-xl ${
+                                  mapBlueTeamChoice === 'TEAM_A'
+                                    ? 'bg-blue-900/25 border-blue-500/70'
+                                    : 'bg-slate-900/60 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15'
+                                }`}
+                              >
+                                <span className="text-2xl font-black text-white uppercase">{state.teamA.name}</span>
+                                <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
+                              </div>
+                            </button>
+                            <button onClick={() => handleSeparateSelection('MAP_BLUE', 'TEAM_B')} className="group">
+                              <div
+                                className={`w-full h-28 border-2 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all shadow-xl ${
+                                  mapBlueTeamChoice === 'TEAM_B'
+                                    ? 'bg-blue-900/25 border-blue-500/70'
+                                    : 'bg-slate-900/60 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15'
+                                }`}
+                              >
+                                <span className="text-2xl font-black text-white uppercase">{state.teamB.name}</span>
+                                <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
+                              </div>
+                            </button>
+                          </div>
+                        </div>
+                        <div className="space-y-4">
+                          <div className="text-xl font-black text-yellow-300">这一局的优先禁选为：</div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                            <button onClick={() => handleSeparateSelection('PRIORITY', 'TEAM_A')} className="group">
+                              <div
+                                className={`w-full h-24 border-2 rounded-3xl flex flex-col items-center justify-center gap-1 transition-all shadow-xl ${
+                                  priorityTeamChoice === 'TEAM_A'
+                                    ? 'bg-yellow-900/25 border-yellow-500/70'
+                                    : 'bg-slate-900/60 border-slate-700/60 hover:border-yellow-500/70 hover:bg-yellow-900/15'
+                                }`}
+                              >
+                                <span className="text-xl font-black text-white uppercase">{state.teamA.name}</span>
+                                <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
+                              </div>
+                            </button>
+                            <button onClick={() => handleSeparateSelection('PRIORITY', 'TEAM_B')} className="group">
+                              <div
+                                className={`w-full h-24 border-2 rounded-3xl flex flex-col items-center justify-center gap-1 transition-all shadow-xl ${
+                                  priorityTeamChoice === 'TEAM_B'
+                                    ? 'bg-yellow-900/25 border-yellow-500/70'
+                                    : 'bg-slate-900/60 border-slate-700/60 hover:border-yellow-500/70 hover:bg-yellow-900/15'
+                                }`}
+                              >
+                                <span className="text-xl font-black text-white uppercase">{state.teamB.name}</span>
+                                <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
+                              </div>
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-slate-500 text-center">
+                          完成两项选择后会自动确认本局蓝色方与优先禁选。
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1461,15 +1753,20 @@ export default function App() {
 
         <TeamPanel
           side="RED"
-          bans={state.redBans}
-          picks={state.redPicks}
-          active={state.status === 'RUNNING' && currentStep?.side === 'RED'}
+          draftSide={redDraftInfo.draftSide}
+          bans={redDraftInfo.bans}
+          picks={redDraftInfo.picks}
+          active={state.status === 'RUNNING' && currentStep?.side === redDraftInfo.draftSide}
           teamName={redData ? redData.name : 'TBD'}
           teamWins={redData ? redData.wins : 0}
           status={state.status}
-          isReady={state.redReady}
+          isReady={redDraftInfo.ready}
           canControl={isRedUser}
-          onToggleReady={canInteract || (bothSidesSet && isRedUser) ? () => send('TOGGLE_READY', { side: 'RED' }) : undefined}
+          onToggleReady={
+            canInteract || (bothSidesSet && isRedUser && redDraftInfo.draftSide)
+              ? () => send('TOGGLE_READY', { side: redDraftInfo.draftSide })
+              : undefined
+          }
           swapSelection={swapSelection}
           onSwapClick={handleSwap}
           phase={state.phase}

@@ -50,13 +50,18 @@ export interface DraftState {
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
+  stepDurationMs: number;
+  hasReferee: boolean;
+  separateSidePick: boolean;
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number; 
   sides: { [key in TeamId]: Side | null }; 
+  draftSides: { [key in TeamId]: Side | null };
   nextSideSelector: TeamId | 'REFEREE' | null; 
   
   seriesHistory: GameResultSnapshot[];
+  pendingApproval?: { type: 'UNDO' | 'RESET'; requestedBy: TeamId } | null;
 
   status: DraftStatus;
   phase: DraftPhase;
@@ -99,12 +104,17 @@ export const INITIAL_STATE: DraftState = {
   matchTitle: '',
   seriesMode: 'BO1',
   draftMode: 'STANDARD',
+  stepDurationMs: STEP_DURATION_MS,
+  hasReferee: true,
+  separateSidePick: false,
   teamA: { name: 'Team A', wins: 0 },
   teamB: { name: 'Team B', wins: 0 },
   currentGameIdx: 1,
   sides: { TEAM_A: null, TEAM_B: null },
+  draftSides: { TEAM_A: null, TEAM_B: null },
   nextSideSelector: 'REFEREE',
   seriesHistory: [],
+  pendingApproval: null,
 
   status: 'NOT_STARTED',
   phase: 'DRAFT',
@@ -127,8 +137,9 @@ export const getCurrentStep = (state: DraftState): DraftStep | null => {
 };
 
 const getSideFromRole = (state: DraftState, role: string): Side | null => {
-  if (role === 'TEAM_A') return state.sides.TEAM_A;
-  if (role === 'TEAM_B') return state.sides.TEAM_B;
+  const draftSides = state.draftSides || state.sides;
+  if (role === 'TEAM_A') return draftSides.TEAM_A;
+  if (role === 'TEAM_B') return draftSides.TEAM_B;
   return null;
 };
 
@@ -217,9 +228,25 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
 
   switch (action.type) {
     case 'SET_SIDES':
-      const sideA = action.payload.sideForA as Side;
-      const sideB = sideA === 'BLUE' ? 'RED' : 'BLUE';
-      newState.sides = { TEAM_A: sideA, TEAM_B: sideB };
+      if (state.separateSidePick && action.payload.mapBlueTeam && action.payload.priorityTeam) {
+        const mapBlueTeam = action.payload.mapBlueTeam as TeamId;
+        const priorityTeam = action.payload.priorityTeam as TeamId;
+        const mapBlueSide: Side = 'BLUE';
+        const mapRedSide: Side = 'RED';
+        newState.sides = {
+          TEAM_A: mapBlueTeam === 'TEAM_A' ? mapBlueSide : mapRedSide,
+          TEAM_B: mapBlueTeam === 'TEAM_B' ? mapBlueSide : mapRedSide,
+        };
+        newState.draftSides = {
+          TEAM_A: priorityTeam === 'TEAM_A' ? 'BLUE' : 'RED',
+          TEAM_B: priorityTeam === 'TEAM_B' ? 'BLUE' : 'RED',
+        };
+      } else {
+        const sideA = action.payload.sideForA as Side;
+        const sideB = sideA === 'BLUE' ? 'RED' : 'BLUE';
+        newState.sides = { TEAM_A: sideA, TEAM_B: sideB };
+        newState.draftSides = { TEAM_A: sideA, TEAM_B: sideB };
+      }
       newState.blueReady = false;
       newState.redReady = false;
       break;
@@ -239,15 +266,25 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
       if (winner === 'TEAM_A') newState.teamA.wins++;
       else newState.teamB.wins++;
       
+      const blueSideTeam = state.sides.TEAM_A === 'BLUE' ? 'TEAM_A' : 'TEAM_B';
+      const redSideTeam = state.sides.TEAM_A === 'RED' ? 'TEAM_A' : 'TEAM_B';
+      const getDraftSideForTeam = (teamId: TeamId) => state.draftSides?.[teamId] || state.sides[teamId];
+      const getTeamDraftPicks = (teamId: TeamId) => {
+        const draftSide = getDraftSideForTeam(teamId);
+        if (draftSide === 'BLUE') return { bans: state.blueBans, picks: state.bluePicks };
+        return { bans: state.redBans, picks: state.redPicks };
+      };
+      const blueDraftData = getTeamDraftPicks(blueSideTeam);
+      const redDraftData = getTeamDraftPicks(redSideTeam);
       const gameRecord: GameResultSnapshot = {
         gameIdx: state.currentGameIdx,
         winner,
-        blueSideTeam: state.sides.TEAM_A === 'BLUE' ? 'TEAM_A' : 'TEAM_B',
-        redSideTeam: state.sides.TEAM_A === 'RED' ? 'TEAM_A' : 'TEAM_B',
-        blueBans: state.blueBans,
-        redBans: state.redBans,
-        bluePicks: state.bluePicks,
-        redPicks: state.redPicks
+        blueSideTeam,
+        redSideTeam,
+        blueBans: blueDraftData.bans,
+        redBans: redDraftData.bans,
+        bluePicks: blueDraftData.picks,
+        redPicks: redDraftData.picks
       };
       newState.seriesHistory = [...(state.seriesHistory || []), gameRecord];
 
@@ -274,6 +311,7 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
         const loser = winner === 'TEAM_A' ? 'TEAM_B' : 'TEAM_A';
         newState.nextSideSelector = loser;
         newState.sides = { TEAM_A: null, TEAM_B: null };
+        newState.draftSides = { TEAM_A: null, TEAM_B: null };
       } else {
         newState.nextSideSelector = null; 
       }
@@ -285,8 +323,14 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
         matchTitle: state.matchTitle,
         seriesMode: state.seriesMode,
         draftMode: state.draftMode,
+        stepDurationMs: state.stepDurationMs,
+        hasReferee: state.hasReferee,
+        separateSidePick: state.separateSidePick,
         teamA: { ...state.teamA, wins: 0 },
         teamB: { ...state.teamB, wins: 0 },
+        nextSideSelector: state.hasReferee ? 'REFEREE' : 'TEAM_A',
+        draftSides: { TEAM_A: null, TEAM_B: null },
+        pendingApproval: null,
         lastActionSeq: action.seq
       };
 
@@ -338,6 +382,7 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
 export const applyAction = (state: DraftState, payload: any, now: number): DraftState => {
   let action: DraftAction | null = null;
   const nextSeq = state.lastActionSeq + 1;
+  const stepDurationMs = state.stepDurationMs ?? STEP_DURATION_MS;
 
   if (['START_GAME', 'RESET_GAME', 'TOGGLE_READY', 'PAUSE_GAME', 'RESUME_GAME', 'SET_SIDES', 'REPORT_RESULT'].includes(payload.type)) {
       action = { 
@@ -407,12 +452,14 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
           newState.pausedAt = undefined;
       }
   } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
-      if (action.type === 'START_GAME') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
+      if (stepDurationMs <= 0) {
+        newState.stepEndsAt = 0;
+      } else if (action.type === 'START_GAME') {
+          newState.stepEndsAt = now + stepDurationMs;
       } else if (state.phase === 'DRAFT' && newState.phase === 'SWAP') {
-          newState.stepEndsAt = now + STEP_DURATION_MS; 
+          newState.stepEndsAt = now + stepDurationMs; 
       } else if (newState.phase === 'DRAFT') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
+          newState.stepEndsAt = now + stepDurationMs;
       } else {
         // Swap 阶段内部动作不重置时间
         newState.stepEndsAt = state.stepEndsAt;
@@ -425,14 +472,33 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
   return newState;
 };
 
-export const replay = (history: DraftAction[], now: number): DraftState => {
-    let state = { ...INITIAL_STATE }; 
+export const replay = (history: DraftAction[], now: number, baseState?: DraftState): DraftState => {
+    const seed = baseState || INITIAL_STATE;
+    let state: DraftState = {
+      ...INITIAL_STATE,
+      matchTitle: seed.matchTitle,
+      seriesMode: seed.seriesMode,
+      draftMode: seed.draftMode,
+      stepDurationMs: seed.stepDurationMs,
+      hasReferee: seed.hasReferee,
+      separateSidePick: seed.separateSidePick,
+      teamA: { name: seed.teamA?.name || 'Team A', wins: 0 },
+      teamB: { name: seed.teamB?.name || 'Team B', wins: 0 },
+      sides: seed.sides || { TEAM_A: null, TEAM_B: null },
+      draftSides: seed.draftSides || seed.sides || { TEAM_A: null, TEAM_B: null },
+      nextSideSelector: seed.hasReferee ? 'REFEREE' : 'TEAM_A',
+      pendingApproval: null,
+    };
     for (const action of history) {
         state = reduceState(state, action);
     }
     state.history = history;
     if (state.status === 'RUNNING' && state.phase !== 'FINISHED' && !state.paused) {
-        state.stepEndsAt = now + STEP_DURATION_MS;
+        if (state.stepDurationMs <= 0) {
+          state.stepEndsAt = 0;
+        } else {
+          state.stepEndsAt = now + state.stepDurationMs;
+        }
     } else {
         state.stepEndsAt = 0;
     }

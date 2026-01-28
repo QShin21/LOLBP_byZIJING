@@ -49,6 +49,11 @@ type DraftMode = 'STANDARD' | 'FEARLESS';
 type TeamId = 'TEAM_A' | 'TEAM_B';
 type UserRole = 'REFEREE' | 'SPECTATOR' | TeamId;
 
+type PeerOp = 'UNDO' | 'RESET';
+type PeerSignalPayload =
+  | { kind: 'REQUEST'; requestId: string; op: PeerOp; from: TeamId; createdAt: number }
+  | { kind: 'RESPONSE'; requestId: string; op: PeerOp; from: TeamId; approve: boolean };
+
 const SPECIAL_ID_NONE = 'special_none';
 const SPECIAL_ID_RANDOM = 'special_random';
 
@@ -331,15 +336,15 @@ const matchesSearch = (h: Hero, term: string) => {
 
 const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: (id: string) => void }) => {
   const [activeTab, setActiveTab] = useState<'CREATE' | 'JOIN'>('CREATE');
-  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' });
+  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD', stepTimeLimitSec: 30, hasReferee: true });
   const [joinId, setJoinId] = useState('');
 
   return (
-    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative overflow-hidden">
+    <div className="min-h-screen bg-slate-950 flex items-start justify-center p-4 sm:p-6 py-10 relative overflow-x-hidden overflow-y-auto">
       <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_30%_30%,rgba(234,179,8,0.15),transparent_55%),radial-gradient(circle_at_70%_60%,rgba(59,130,246,0.12),transparent_55%),radial-gradient(circle_at_40%_80%,rgba(239,68,68,0.10),transparent_55%)]" />
       <div className="absolute top-0 left-0 w-full h-full opacity-10 bg-[url('https://lol.qq.com/act/a20220120lpl/img/bg.jpg')] bg-cover bg-center" />
 
-      <div className="max-w-xl w-full bg-slate-900/75 backdrop-blur-2xl border border-slate-700/70 rounded-3xl p-8 shadow-2xl z-10">
+      <div className="max-w-xl w-full bg-slate-900/75 backdrop-blur-2xl border border-slate-700/70 rounded-3xl p-6 sm:p-8 shadow-2xl z-10">
         <div className="text-center mb-8">
           <div className="mx-auto w-16 h-16 rounded-2xl bg-gradient-to-br from-yellow-500/25 to-slate-800/30 border border-slate-700/60 flex items-center justify-center shadow-lg">
             <Sword size={32} className="text-yellow-400" />
@@ -405,24 +410,85 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
               </div>
             </div>
 
-            <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Series Format</label>
-              <div className="flex gap-2">
-                {['BO1', 'BO2', 'BO3', 'BO5'].map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => setConfig({ ...config, seriesMode: m })}
-                    className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
-                      config.seriesMode === m
-                        ? 'bg-yellow-600/90 border-yellow-600 text-white shadow-md shadow-yellow-900/20'
-                        : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
-                    }`}
-                  >
-                    {m}
-                  </button>
-                ))}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Series Format</label>
+                <div className="flex gap-2">
+                  {['BO1', 'BO2', 'BO3', 'BO5'].map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setConfig({ ...config, seriesMode: m })}
+                      className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                        config.seriesMode === m
+                          ? 'bg-yellow-600/90 border-yellow-600 text-white shadow-md shadow-yellow-900/20'
+                          : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Turn Timer</label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: '30s', value: 30 },
+                    { label: '60s', value: 60 },
+                    { label: '90s', value: 90 },
+                    { label: 'No Limit', value: 0 },
+                  ].map((t) => (
+                    <button
+                      key={t.value}
+                      onClick={() => setConfig({ ...config, stepTimeLimitSec: t.value })}
+                      className={`py-2.5 rounded-xl border font-bold transition-all ${
+                        config.stepTimeLimitSec === t.value
+                          ? 'bg-emerald-600/90 border-emerald-600 text-white shadow-md shadow-emerald-900/20'
+                          : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-2">
+                  {config.stepTimeLimitSec === 0 ? 'No time limit per step.' : `Time limit per step: ${config.stepTimeLimitSec}s.`}
+                </div>
               </div>
             </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Referee</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setConfig({ ...config, hasReferee: true })}
+                  className={`py-2.5 rounded-xl border font-bold transition-all ${
+                    config.hasReferee
+                      ? 'bg-yellow-600/90 border-yellow-600 text-white shadow-md shadow-yellow-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  Yes
+                </button>
+                <button
+                  onClick={() => setConfig({ ...config, hasReferee: false })}
+                  className={`py-2.5 rounded-xl border font-bold transition-all ${
+                    !config.hasReferee
+                      ? 'bg-yellow-600/90 border-yellow-600 text-white shadow-md shadow-yellow-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  No
+                </button>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2">
+                {config.hasReferee
+                  ? 'Referee can pause, start, and reset.'
+                  : 'No referee mode: only Team A / Team B / Spectators. Start is automatic after both ready. Undo / Reset require opponent approval.'}
+              </div>
+            </div>
+
 
             <div>
               <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Draft Mode</label>
@@ -489,7 +555,15 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
   );
 };
 
-const RoleSelectionModal = ({ state, onSelect }: { state: DraftState; onSelect: (role: UserRole) => void }) => {
+const RoleSelectionModal = ({
+  state,
+  onSelect,
+  hasReferee,
+}: {
+  state: DraftState;
+  onSelect: (role: UserRole) => void;
+  hasReferee: boolean;
+}) => {
   if (!state || !state.teamA || !state.teamB) return null;
 
   return (
@@ -523,18 +597,67 @@ const RoleSelectionModal = ({ state, onSelect }: { state: DraftState; onSelect: 
             <span className="text-[10px] text-slate-500 font-bold tracking-widest">TEAM B</span>
           </button>
 
-          <button
-            onClick={() => onSelect('REFEREE')}
-            className="h-20 bg-yellow-950/20 hover:bg-yellow-900/25 border border-yellow-700/60 hover:border-yellow-500/70 rounded-2xl flex items-center justify-center gap-2 text-yellow-400 font-black transition-all"
-          >
-            <UserCog /> REFEREE
-          </button>
+          {hasReferee && (
+            <button
+              onClick={() => onSelect('REFEREE')}
+              className="h-20 bg-yellow-950/20 hover:bg-yellow-900/25 border border-yellow-700/60 hover:border-yellow-500/70 rounded-2xl flex items-center justify-center gap-2 text-yellow-400 font-black transition-all"
+            >
+              <UserCog /> REFEREE
+            </button>
+          )}
 
           <button
             onClick={() => onSelect('SPECTATOR')}
-            className="h-20 bg-slate-900/40 hover:bg-slate-800/50 border border-slate-700/70 hover:border-slate-500/70 rounded-2xl flex items-center justify-center gap-2 text-slate-300 font-black transition-all"
+            className={`h-20 bg-slate-900/40 hover:bg-slate-800/50 border border-slate-700/70 hover:border-slate-500/70 rounded-2xl flex items-center justify-center gap-2 text-slate-300 font-black transition-all ${
+              hasReferee ? '' : 'col-span-2'
+            }`}
           >
             <Eye /> SPECTATOR
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const PeerRequestModal = ({
+  request,
+  teamAName,
+  teamBName,
+  onApprove,
+  onReject,
+}: {
+  request: Extract<PeerSignalPayload, { kind: 'REQUEST' }>;
+  teamAName: string;
+  teamBName: string;
+  onApprove: () => void;
+  onReject: () => void;
+}) => {
+  const fromName = request.from === 'TEAM_A' ? teamAName : teamBName;
+  const opText = request.op === 'UNDO' ? '撤回' : '重开';
+
+  return (
+    <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+      <div className="bg-slate-900/85 backdrop-blur-2xl border border-slate-700/70 p-6 sm:p-8 rounded-3xl max-w-lg w-full shadow-2xl">
+        <div className="text-center mb-6">
+          <div className="text-2xl font-black text-white">对方请求 {opText}</div>
+          <div className="text-slate-400 text-sm mt-1">
+            {fromName} 发起了 {opText} 操作，需要你同意后才会执行
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={onReject}
+            className="py-3 rounded-2xl bg-slate-800/70 hover:bg-slate-700/70 border border-slate-700/60 text-slate-200 font-black transition-all"
+          >
+            不同意
+          </button>
+          <button
+            onClick={onApprove}
+            className="py-3 rounded-2xl bg-green-600/90 hover:bg-green-500/90 border border-green-500/40 text-white font-black transition-all"
+          >
+            同意
           </button>
         </div>
       </div>
@@ -849,6 +972,13 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
 
 export default function App() {
   const [roomId, setRoomId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('room'));
+  const [roomHasReferee, setRoomHasReferee] = useState<boolean>(() => {
+    const p = new URLSearchParams(window.location.search);
+    const v = p.get('ref');
+    if (v === '0' || v === 'false' || v === 'no') return false;
+    if (v === '1' || v === 'true' || v === 'yes') return true;
+    return true;
+  });
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [state, setState] = useState<DraftState | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -860,6 +990,15 @@ export default function App() {
   const [roleFilter, setRoleFilter] = useState<string>('ALL');
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
+  const [incomingPeerRequest, setIncomingPeerRequest] = useState<Extract<PeerSignalPayload, { kind: 'REQUEST' }> | null>(null);
+  const [outgoingPeerRequest, setOutgoingPeerRequest] = useState<Extract<PeerSignalPayload, { kind: 'REQUEST' }> | null>(null);
+  const opInProgressRef = useRef(false);
+  const stateRef = useRef<DraftState | null>(null);
+  const userRoleRef = useRef<UserRole | null>(null);
+  const roomHasRefereeRef = useRef<boolean>(true);
+  const outgoingPeerRequestRef = useRef<Extract<PeerSignalPayload, { kind: 'REQUEST' }> | null>(null);
+
+  const formatTimeLeft = (t: number) => (Number.isFinite(t) ? `${t}s` : '∞');
 
   const [lastSeenSeq, setLastSeenSeq] = useState<number>(0);
   const [, setMissedActions] = useState<DraftAction[]>([]);
@@ -870,6 +1009,22 @@ export default function App() {
       return () => clearTimeout(t);
     }
   }, [toast]);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    userRoleRef.current = userRole;
+  }, [userRole]);
+
+  useEffect(() => {
+    roomHasRefereeRef.current = roomHasReferee;
+  }, [roomHasReferee]);
+
+  useEffect(() => {
+    outgoingPeerRequestRef.current = outgoingPeerRequest;
+  }, [outgoingPeerRequest]);
 
   // WS Connection
   useEffect(() => {
@@ -896,6 +1051,32 @@ export default function App() {
           setState(ns);
         } else if (msg.type === 'ACTION_REJECTED') {
           setToast({ msg: msg.payload.reason, type: 'error' });
+        } else if (msg.type === 'PEER_SIGNAL') {
+          const payload = msg.payload as PeerSignalPayload;
+          const hasRef = roomHasRefereeRef.current;
+          const me = userRoleRef.current;
+          if (hasRef) return;
+          if (!me || me === 'SPECTATOR') return;
+
+          if (payload?.kind === 'REQUEST') {
+            const other: TeamId = payload.from === 'TEAM_A' ? 'TEAM_B' : 'TEAM_A';
+            if (me === other) setIncomingPeerRequest(payload);
+          }
+
+          if (payload?.kind === 'RESPONSE') {
+            const outgoing = outgoingPeerRequestRef.current;
+            if (!outgoing) return;
+            if (payload.requestId !== outgoing.requestId) return;
+            if (payload.approve) {
+              // approved: actual op executed by requester
+              setToast({ msg: '对方已同意', type: 'info' });
+              // keep outgoing request until operation finishes
+              executePeerOp(outgoing.op);
+            } else {
+              setToast({ msg: '对方拒绝了请求', type: 'error' });
+              setOutgoingPeerRequest(null);
+            }
+          }
         }
       } catch (e) {
         console.error(e);
@@ -924,9 +1105,13 @@ export default function App() {
   );
 
   // Derived Info
+  useEffect(() => {
+    if (!roomHasReferee && userRole === 'REFEREE') setUserRole('SPECTATOR');
+  }, [roomHasReferee, userRole]);
+
   const myTeamId = userRole === 'TEAM_A' || userRole === 'TEAM_B' ? userRole : null;
   const mySide = state && myTeamId ? state.sides[myTeamId] : null;
-  const isReferee = userRole === 'REFEREE';
+  const isReferee = roomHasReferee && userRole === 'REFEREE';
   const isSpectator = userRole === 'SPECTATOR';
 
   const canInteract = useMemo(() => {
@@ -938,14 +1123,53 @@ export default function App() {
 
   // Timer
   useEffect(() => {
-    if (!state || state.status !== 'RUNNING' || state.paused) {
-      if (state?.paused && state.pausedAt) setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
+    const endsAt = state?.stepEndsAt ?? 0;
+
+    // Unlimited timer: stepEndsAt <= 0 (server can send 0, null, or negative)
+    if (endsAt <= 0) {
+      if (state?.status === 'RUNNING') setTimeLeft(Infinity);
       else setTimeLeft(0);
       return;
     }
-    const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - Date.now()) / 1000))), 200);
+
+    if (!state || state.status !== 'RUNNING' || state.paused) {
+      if (state?.paused && state.pausedAt) setTimeLeft(Math.max(0, Math.ceil((endsAt - state.pausedAt) / 1000)));
+      else setTimeLeft(0);
+      return;
+    }
+
+    const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))), 200);
     return () => clearInterval(i);
   }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt]);
+
+  // No-referee: auto start when both teams ready
+  const autoStartRef = useRef(false);
+  useEffect(() => {
+    if (roomHasReferee) return;
+    if (!state) return;
+
+    const bothSidesSetNow = !!(state?.sides?.TEAM_A && state?.sides?.TEAM_B);
+    if (!bothSidesSetNow) {
+      autoStartRef.current = false;
+      return;
+    }
+
+    if (state.status !== 'NOT_STARTED') {
+      autoStartRef.current = false;
+      return;
+    }
+
+    if (state.blueReady && state.redReady) {
+      if (autoStartRef.current) return;
+      autoStartRef.current = true;
+      // allow either team to trigger; server should be idempotent
+      if (userRole === 'TEAM_A' || userRole === 'TEAM_B') {
+        send('ACTION_SUBMIT', { type: 'START_GAME' });
+      }
+    } else {
+      autoStartRef.current = false;
+    }
+  }, [roomHasReferee, state?.status, state?.blueReady, state?.redReady, state?.sides, userRole]);
 
   // Actions
   const handleLock = () => {
@@ -986,12 +1210,25 @@ export default function App() {
 
   const handleCreate = async (cfg: any) => {
     //const res = await fetch('http://localhost:8080/rooms', { method: 'POST', body: JSON.stringify(cfg) });
-    const res = await fetch('https://zijing.yejiaxin.online/rooms', { method: 'POST', body: JSON.stringify(cfg) });
+    const payload = {
+      ...cfg,
+      stepTimeLimitSec: typeof cfg?.stepTimeLimitSec === 'number' ? cfg.stepTimeLimitSec : 30,
+      stepTimeSec: typeof cfg?.stepTimeLimitSec === 'number' ? cfg.stepTimeLimitSec : 30,
+      hasReferee: typeof cfg?.hasReferee === 'boolean' ? cfg.hasReferee : true,
+    };
+
+    const res = await fetch('https://zijing.yejiaxin.online/rooms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
     const data = await res.json();
-    window.history.pushState(null, '', `?room=${data.roomId}`);
+    const refParam = payload.hasReferee ? '1' : '0';
+    window.history.pushState(null, '', `?room=${data.roomId}&ref=${refParam}`);
     setRoomId(data.roomId);
+    setRoomHasReferee(payload.hasReferee);
     // === 新增：自动复制网址并弹窗 ===
-    const roomUrl = `${window.location.origin}/?room=${data.roomId}`;
+    const roomUrl = `${window.location.origin}/?room=${data.roomId}&ref=${refParam}`;
     navigator.clipboard.writeText(roomUrl).then(() => {
       alert(`✅ 房间已创建！\n\n网址已自动复制到剪贴板：\n${roomUrl}`);
     }).catch(() => {
@@ -1001,7 +1238,9 @@ export default function App() {
   };
 
   const handleJoin = (id: string) => {
-    window.history.pushState(null, '', `?room=${id}`);
+    const p = new URLSearchParams(window.location.search);
+    const ref = p.get('ref');
+    window.history.pushState(null, '', ref ? `?room=${id}&ref=${ref}` : `?room=${id}`);
     setRoomId(id);
   };
 
@@ -1020,6 +1259,144 @@ export default function App() {
 
   const handleReportResult = (winner: TeamId) => send('ACTION_SUBMIT', { type: 'REPORT_RESULT', winner });
 
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const waitUntil = async (cond: () => boolean, timeoutMs = 6000) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (cond()) return true;
+      await sleep(80);
+    }
+    return false;
+  };
+
+  const replayRoomActions = async (actions: any[]) => {
+    for (const a of actions) {
+      const t = a?.type as string | undefined;
+      if (!t) continue;
+
+      if (t === 'TOGGLE_READY') {
+        if (a.side) send('TOGGLE_READY', { side: a.side });
+      } else if (t === 'BAN' || t === 'PICK') {
+        if (a.heroId) send('ACTION_SUBMIT', { heroId: a.heroId });
+      } else if (t === 'SWAP') {
+        send('ACTION_SUBMIT', { type: 'SWAP', side: a.side, swapData: a.swapData });
+      } else if (t === 'FINISH_SWAP') {
+        send('ACTION_SUBMIT', { type: 'FINISH_SWAP' });
+      } else if (t === 'SET_SIDES') {
+        // support multiple possible field names
+        send('ACTION_SUBMIT', {
+          type: 'SET_SIDES',
+          sideForA: a.sideForA ?? a.side_for_a ?? a.payload?.sideForA ?? a.payload?.side_for_a,
+        });
+      } else if (t === 'START_GAME') {
+        send('ACTION_SUBMIT', { type: 'START_GAME' });
+      }
+
+      // small pacing: keep WS ordered, reduce server-side race
+      await sleep(80);
+    }
+  };
+
+  const executePeerOp = async (op: PeerOp) => {
+    if (!roomId) return;
+    if (!myTeamId) return;
+    if (roomHasReferee) return;
+    if (opInProgressRef.current) return;
+    opInProgressRef.current = true;
+
+    try {
+      if (op === 'RESET') {
+        send('ACTION_SUBMIT', { type: 'RESET_GAME' });
+        setOutgoingPeerRequest(null);
+        return;
+      }
+
+      // UNDO: best-effort implementation (reset + replay all but last draft decision)
+      const res = await fetch(`https://zijing.yejiaxin.online/rooms/${roomId}/actions?afterSeq=0`);
+      const data = await res.json();
+      const actions = (data.actions || []) as any[];
+      if (!actions.length) {
+        setToast({ msg: '没有可撤回的操作', type: 'error' });
+        setOutgoingPeerRequest(null);
+        return;
+      }
+
+      const lastResetIdx = (() => {
+        for (let i = actions.length - 1; i >= 0; i--) {
+          if (actions[i]?.type === 'RESET_GAME') return i;
+        }
+        return -1;
+      })();
+
+      const gameActions = actions.slice(lastResetIdx + 1);
+      const removableTypes = new Set(['BAN', 'PICK', 'SWAP', 'FINISH_SWAP']);
+      let removeIdx = -1;
+      for (let i = gameActions.length - 1; i >= 0; i--) {
+        if (removableTypes.has(gameActions[i]?.type)) {
+          removeIdx = i;
+          break;
+        }
+      }
+
+      if (removeIdx < 0) {
+        setToast({ msg: '没有可撤回的 BP 操作', type: 'error' });
+        setOutgoingPeerRequest(null);
+        return;
+      }
+
+      const replay = gameActions.filter((_: any, i: number) => i !== removeIdx);
+
+      // reset
+      send('ACTION_SUBMIT', { type: 'RESET_GAME' });
+      await waitUntil(() => stateRef.current?.status === 'NOT_STARTED');
+      await sleep(160);
+
+      // replay
+      await replayRoomActions(replay);
+      setToast({ msg: '已撤回一手', type: 'info' });
+      setOutgoingPeerRequest(null);
+    } catch (e) {
+      console.error(e);
+      setToast({ msg: '撤回失败，请重试', type: 'error' });
+      setOutgoingPeerRequest(null);
+    } finally {
+      opInProgressRef.current = false;
+    }
+  };
+
+  const requestPeerOp = (op: PeerOp) => {
+    if (!myTeamId) return;
+    if (roomHasReferee) return;
+    if (outgoingPeerRequest || opInProgressRef.current) return;
+
+    const requestId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const req: Extract<PeerSignalPayload, { kind: 'REQUEST' }> = {
+      kind: 'REQUEST',
+      requestId,
+      op,
+      from: myTeamId,
+      createdAt: Date.now(),
+    };
+    setOutgoingPeerRequest(req);
+    setToast({ msg: '已发起请求，等待对方同意', type: 'info' });
+    send('PEER_SIGNAL', req);
+  };
+
+  const respondToIncomingPeerRequest = (approve: boolean) => {
+    if (!incomingPeerRequest) return;
+    if (!myTeamId) return;
+    const resPayload: Extract<PeerSignalPayload, { kind: 'RESPONSE' }> = {
+      kind: 'RESPONSE',
+      requestId: incomingPeerRequest.requestId,
+      op: incomingPeerRequest.op,
+      from: myTeamId,
+      approve,
+    };
+    send('PEER_SIGNAL', resPayload);
+    setIncomingPeerRequest(null);
+  };
+
   if (!roomId) return <Lobby onCreate={handleCreate} onJoin={handleJoin} />;
 
   if (!state || !state.teamA || !state.teamB || !state.sides) {
@@ -1034,6 +1411,10 @@ export default function App() {
 
   const bothSidesSet = state.sides.TEAM_A && state.sides.TEAM_B;
 
+  const effectiveNextSideSelector = roomHasReferee
+    ? state.nextSideSelector
+    : (state.nextSideSelector === 'REFEREE' ? 'TEAM_A' : state.nextSideSelector);
+
   const getTeamData = (teamId: string | null) => {
     if (teamId === 'TEAM_A') return state.teamA;
     if (teamId === 'TEAM_B') return state.teamB;
@@ -1046,8 +1427,8 @@ export default function App() {
   const blueData = getTeamData(teamOnBlueId);
   const redData = getTeamData(teamOnRedId);
 
-  const isBlueUser = userRole === 'REFEREE' || (teamOnBlueId && userRole === teamOnBlueId);
-  const isRedUser = userRole === 'REFEREE' || (teamOnRedId && userRole === teamOnRedId);
+  const isBlueUser = isReferee || (teamOnBlueId && userRole === teamOnBlueId);
+  const isRedUser = isReferee || (teamOnRedId && userRole === teamOnRedId);
 
   // FEARLESS LOGIC
   const fearlessBannedHeroes = new Set<string>();
@@ -1068,7 +1449,17 @@ export default function App() {
           {toast.msg}
         </div>
       )}
-      {!userRole && <RoleSelectionModal state={state} onSelect={setUserRole} />}
+      {!userRole && <RoleSelectionModal state={state} onSelect={setUserRole} hasReferee={roomHasReferee} />}
+
+      {incomingPeerRequest && userRole && userRole !== 'SPECTATOR' && !roomHasReferee && (
+        <PeerRequestModal
+          request={incomingPeerRequest}
+          teamAName={state.teamA?.name || 'Team A'}
+          teamBName={state.teamB?.name || 'Team B'}
+          onApprove={() => respondToIncomingPeerRequest(true)}
+          onReject={() => respondToIncomingPeerRequest(false)}
+        />
+      )}
 
       {/* Header */}
       <header className="h-20 bg-slate-900/70 backdrop-blur-2xl border-b border-slate-800/70 flex items-center justify-between px-6 md:px-8 shadow-lg z-10 relative">
@@ -1121,14 +1512,14 @@ export default function App() {
                     {currentStep.side} {currentStep.type}
                   </span>
                   <span className="text-slate-600">|</span>
-                  <span className="text-slate-100">{timeLeft}s</span>
+                  <span className="text-slate-100">{formatTimeLeft(timeLeft)}</span>
                 </div>
               )
             ) : state.phase === 'SWAP' ? (
               <div className="text-xl font-black flex gap-2 text-yellow-400 animate-pulse">
                 <span>SWAP PHASE</span>
                 <span className="text-slate-600">|</span>
-                <span>{timeLeft}s</span>
+                <span>{formatTimeLeft(timeLeft)}</span>
               </div>
             ) : null
           )}
@@ -1173,6 +1564,30 @@ export default function App() {
             </div>
           )}
 
+          {!roomHasReferee && (userRole === 'TEAM_A' || userRole === 'TEAM_B') && (
+            <div
+              className={`flex bg-slate-800/60 rounded-2xl p-1 border border-slate-700/60 ${outgoingPeerRequest ? 'ring-1 ring-yellow-500/50' : ''}`}
+              title="No referee mode: Undo / Reset require opponent approval"
+            >
+              <button
+                onClick={() => requestPeerOp('UNDO')}
+                disabled={!!outgoingPeerRequest || opInProgressRef.current}
+                className="p-2 hover:text-yellow-400 disabled:opacity-30 transition-colors"
+                title="撤回（需要对方同意）"
+              >
+                <RotateCcw size={16} className="rotate-180" />
+              </button>
+              <button
+                onClick={() => requestPeerOp('RESET')}
+                disabled={!!outgoingPeerRequest || opInProgressRef.current}
+                className="p-2 hover:text-white disabled:opacity-30 transition-colors"
+                title="重开（需要对方同意）"
+              >
+                <RotateCcw size={16} />
+              </button>
+            </div>
+          )}
+
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800/60 border border-slate-700/60 text-xs font-black text-slate-300">
             {userRole === 'TEAM_A' ? state.teamA.name : userRole === 'TEAM_B' ? state.teamB.name : userRole}
           </div>
@@ -1212,11 +1627,13 @@ export default function App() {
                 <div className="text-center">
                   <h2 className="text-4xl font-black text-white italic mb-4">SIDE SELECTION</h2>
                   <div className="text-slate-400 mb-8 text-lg">
-                    {state.nextSideSelector === 'REFEREE' ? 'Referee is setting initial sides' : `${getTeamData(state.nextSideSelector)?.name} is choosing side`}
+                    {roomHasReferee && state.nextSideSelector === 'REFEREE'
+                      ? 'Referee is setting initial sides'
+                      : `${getTeamData(effectiveNextSideSelector as any)?.name || 'Team'} is choosing side`}
                   </div>
                 </div>
 
-                {(isReferee || userRole === state.nextSideSelector) && (
+                {(isReferee || userRole === effectiveNextSideSelector) && (
                   <div className="flex flex-col items-center gap-6">
                     <div className="text-xl font-black text-blue-300">这一局的蓝色方是：</div>
                     <div className="flex flex-col md:flex-row gap-5 md:gap-10 w-full justify-center">

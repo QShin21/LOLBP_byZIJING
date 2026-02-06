@@ -331,7 +331,7 @@ const matchesSearch = (h: Hero, term: string) => {
 
 const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: (id: string) => void }) => {
   const [activeTab, setActiveTab] = useState<'CREATE' | 'JOIN'>('CREATE');
-  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' });
+  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' ,timeLimit: 30 });
   const [joinId, setJoinId] = useState('');
 
   return (
@@ -452,6 +452,25 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
                 {config.draftMode === 'STANDARD'
                   ? 'Heroes reset each game.'
                   : 'Global Fearless: Heroes picked in previous games are banned for BOTH teams.'}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Time Per Turn</label>
+              <div className="flex gap-2">
+                {[30, 60, 90, 0].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setConfig({ ...config, timeLimit: t })}
+                    className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                      config.timeLimit === t
+                        ? 'bg-purple-600/90 border-purple-600 text-white shadow-md shadow-purple-900/20'
+                        : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                    }`}
+                  >
+                    {t === 0 ? '∞' : `${t}s`}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -937,15 +956,23 @@ export default function App() {
   }, [state, isReferee, currentStep, mySide]);
 
   // Timer
+  // Timer
   useEffect(() => {
-    if (!state || state.status !== 'RUNNING' || state.paused) {
-      if (state?.paused && state.pausedAt) setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
-      else setTimeLeft(0);
+    // 如果 timeLimit 是 0（无限制），或者还没有设置 stepEndsAt（0），或者不是 RUNNING、或已暂停，则不做正常倒计时
+    if (!state || state.status !== 'RUNNING' || state.paused || state.stepEndsAt === 0 || state.timeLimit === 0) {
+      // 只有在暂停时并且 stepEndsAt 有效 (>0) 时显示暂停时的剩余时间
+      if (state?.paused && state.pausedAt && state.stepEndsAt > 0) {
+        setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
+      } else {
+        setTimeLeft(0);
+      }
       return;
     }
+
+    // 正常倒计时逻辑
     const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - Date.now()) / 1000))), 200);
     return () => clearInterval(i);
-  }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt]);
+  }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt, state?.timeLimit]);
 
   // Actions
   const handleLock = () => {
@@ -1121,14 +1148,16 @@ export default function App() {
                     {currentStep.side} {currentStep.type}
                   </span>
                   <span className="text-slate-600">|</span>
-                  <span className="text-slate-100">{timeLeft}s</span>
+                  <span className="text-slate-100">
+                    {state.timeLimit === 0 ? '∞' : `${timeLeft}s`}
+                  </span>
                 </div>
               )
             ) : state.phase === 'SWAP' ? (
               <div className="text-xl font-black flex gap-2 text-yellow-400 animate-pulse">
                 <span>SWAP PHASE</span>
                 <span className="text-slate-600">|</span>
-                <span>{timeLeft}s</span>
+                <span>{state.timeLimit === 0 ? '∞' : `${timeLeft}s`}</span>
               </div>
             ) : null
           )}

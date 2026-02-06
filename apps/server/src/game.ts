@@ -49,7 +49,7 @@ export interface DraftState {
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
-  timeLimit: number; // <--- 新增：每回合秒数 (0 代表无上限)
+  timeLimit: number; // <--- 每回合秒数 (0 代表无上限)
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number; 
@@ -78,24 +78,14 @@ export interface DraftState {
 // =========================================================
 // HERO IDS (Front/Back-end Single Source of Truth)
 // =========================================================
-// 目标：后端 random / 校验 所用的英雄池，与你前端展示的英雄池同源。
-// 做法：在服务端启动时“同步加载”前端英雄数据模块，并从中提取 id。
-//
-// ✅ 推荐目录结构（任意其一即可）：
-//   1) shared/heroes.ts        （前后端都 import 同一份）
-//   2) src/data/heroes.ts      （前端已有英雄数据，后端直接 require 读取）
-//
-// 下面的 loader 会按顺序尝试多个路径/导出名，保证你不用改太多代码。
-// 如果你的项目路径不同，只需要在 CANDIDATE_MODULE_PATHS 里加一行。
-
 
 type HeroLike = { id: string };
 
 const CANDIDATE_MODULE_PATHS = [
-  // ✅ 方案A：优先读取编译后的 JS 文件 (位于 dist/data/heroes.js)
+  // ✅ 方案A：优先读取复制到后端本地的文件 (位于 apps/server/src/data/heroes.ts)
   './data/heroes',
   
-  // ✅ 方案B：或者读取源码 TS 文件 (位于 src/data/heroes.ts)
+  // ✅ 方案B：或者读取源码 TS 文件 (位于 apps/server/src/data/heroes.ts)
   '../src/data/heroes', 
 ];
 
@@ -123,6 +113,7 @@ function loadHeroIdsOrThrow(): string[] {
   const errors: string[] = [];
   for (const p of CANDIDATE_MODULE_PATHS) {
     try {
+      // 直接使用全局 require (CommonJS)
       const mod = require(p);
       const ids = extractHeroIdsFromModule(mod);
       if (ids.length) return ids;
@@ -138,8 +129,7 @@ function loadHeroIdsOrThrow(): string[] {
       ...errors.map((s) => `  - ${s}`),
       '',
       'Fix options:',
-      '  - (Recommended) create shared/heroes.ts exporting HEROES (array of {id}) or HERO_IDS, and ensure server can import it;',
-      '  - OR adjust CANDIDATE_MODULE_PATHS to point to your existing front-end heroes module;',
+      '  - Ensure apps/server/src/data/heroes.ts exists (copied from web).',
     ].join('\n')
   );
 }
@@ -164,7 +154,7 @@ export const INITIAL_STATE: DraftState = {
   matchTitle: '',
   seriesMode: 'BO1',
   draftMode: 'STANDARD',
-  timeLimit: 30, // <--- 新增：默认 30s
+  timeLimit: 30, // 默认 30s
   teamA: { name: 'Team A', wins: 0 },
   teamB: { name: 'Team B', wins: 0 },
   currentGameIdx: 1,
@@ -424,7 +414,6 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
             let resolvedHeroId = payload.heroId;
             if (resolvedHeroId === SPECIAL_ID_RANDOM) {
                 const usedHeroes = new Set([...state.blueBans, ...state.redBans, ...state.bluePicks, ...state.redPicks]);
-                // Fearless Random Logic
                 const fearlessBans = getFearlessBannedIds(state);
                 
                 const available = HERO_IDS.filter(id => !usedHeroes.has(id) && !fearlessBans.has(id));
@@ -505,13 +494,13 @@ export const replay = (history: DraftAction[], now: number): DraftState => {
     }
     state.history = history;
     
-    // 同样使用 stored state 中的 timeLimit
-    const duration = (state.timeLimit || 0) * 1000;
+    // 这里的 duration 也需要从 state 取
+    const duration = (state.timeLimit || 0) * 1000; 
 
     if (state.status === 'RUNNING' && state.phase !== 'FINISHED' && !state.paused) {
-      state.stepEndsAt = duration > 0 ? now + duration : 0;
+        state.stepEndsAt = duration > 0 ? now + duration : 0; 
     } else {
-      state.stepEndsAt = 0;
+        state.stepEndsAt = 0;
     }
     return state;
 }

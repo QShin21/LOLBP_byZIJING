@@ -8,7 +8,6 @@ import {
   validateMove,
   replay, 
   SPECIAL_ID_RANDOM
-  // ❌ 已删除 STEP_DURATION_MS，因为它不存在了
 } from './game';
 import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions } from './db';
 
@@ -32,7 +31,6 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
     if (persistedState) {
       console.log(`Restored room from Disk: ${roomId}`);
       
-      // FIX: 深度防御性合并。防止旧数据缺少字段导致前端白屏。
       const safeState: DraftState = {
         ...INITIAL_STATE, 
         ...persistedState,
@@ -58,22 +56,16 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         history: persistedState.history || []
       };
 
-      // -----------------------------------------------------------
-      // FIX: 关键修复 - 状态清洗 (State Sanitization)
-      // 如果状态是 NOT_STARTED，强制重置 BP 进度，防止脏数据导致 Step 溢出
-      // -----------------------------------------------------------
       if (safeState.status === 'NOT_STARTED') {
         safeState.draftStepIndex = 0;
-        safeState.stepIndex = 0; // 重置动作步数
+        safeState.stepIndex = 0;
         safeState.blueBans = [];
         safeState.redBans = [];
         safeState.bluePicks = [];
         safeState.redPicks = [];
         safeState.stepEndsAt = 0;
-        // 注意：不要重置 sides，因为选边可能在 NOT_STARTED 阶段已完成
       }
 
-      // 确保 sides 对象结构完整
       if (!safeState.sides) safeState.sides = { TEAM_A: null, TEAM_B: null };
       if (safeState.sides.TEAM_A === undefined) safeState.sides.TEAM_A = null;
       if (safeState.sides.TEAM_B === undefined) safeState.sides.TEAM_B = null;
@@ -85,7 +77,6 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         lastActivity: Date.now()
       };
       
-      // 将清洗后的干净状态写回磁盘
       saveRoomState(roomId, safeState);
       
     } else {
@@ -144,7 +135,6 @@ const server = createServer((req, res) => {
 
   const url = parse(req.url || '', true);
 
-  // API: Create new room
   if (req.method === 'POST' && url.pathname === '/rooms') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -165,7 +155,6 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // API: Get missing actions
   if (req.method === 'GET' && url.pathname?.match(/^\/rooms\/[a-zA-Z0-9]+\/actions$/)) {
     const roomId = url.pathname.split('/')[2];
     const afterSeq = parseInt(url.query.afterSeq as string || '0', 10);
@@ -262,7 +251,6 @@ setInterval(() => {
         newState = applyAction(room.state, { type: 'FINISH_SWAP', actorRole: 'REFEREE' }, now);
       }
 
-      // 如果状态发生了变化，保存并广播
       if (newState !== room.state) {
         const newAction = newState.history[newState.history.length - 1];
         if (newAction) saveActionAndUpdateState(room.id, newAction, newState);

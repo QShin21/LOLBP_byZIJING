@@ -41,7 +41,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         teamB: persistedState.teamB || { name: 'Team B', wins: 0 },
         sides: persistedState.sides || { TEAM_A: null, TEAM_B: null },
         seriesHistory: Array.isArray(persistedState.seriesHistory) ? persistedState.seriesHistory : [],
-        
+        timeLimit: persistedState.timeLimit !== undefined ? persistedState.timeLimit : 30,
         matchTitle: persistedState.matchTitle || '',
         seriesMode: persistedState.seriesMode || 'BO1',
         draftMode: persistedState.draftMode || 'STANDARD',
@@ -99,6 +99,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         matchTitle: initialConfig?.matchTitle || 'Exhibition Match',
         seriesMode: initialConfig?.seriesMode || 'BO1',
         draftMode: initialConfig?.draftMode || 'STANDARD', 
+        timeLimit: initialConfig?.timeLimit !== undefined ? initialConfig.timeLimit : 30,
         teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
         teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
         sides: { TEAM_A: null, TEAM_B: null },

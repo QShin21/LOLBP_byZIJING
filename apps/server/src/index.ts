@@ -7,8 +7,8 @@ import {
   applyAction, 
   validateMove,
   replay, 
-  SPECIAL_ID_RANDOM, 
-  STEP_DURATION_MS 
+  SPECIAL_ID_RANDOM
+  // ❌ 已删除 STEP_DURATION_MS，因为它不存在了
 } from './game';
 import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions } from './db';
 
@@ -41,7 +41,10 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         teamB: persistedState.teamB || { name: 'Team B', wins: 0 },
         sides: persistedState.sides || { TEAM_A: null, TEAM_B: null },
         seriesHistory: Array.isArray(persistedState.seriesHistory) ? persistedState.seriesHistory : [],
+        
+        // 确保读取存档中的 timeLimit，如果没有则默认为 30
         timeLimit: persistedState.timeLimit !== undefined ? persistedState.timeLimit : 30,
+        
         matchTitle: persistedState.matchTitle || '',
         seriesMode: persistedState.seriesMode || 'BO1',
         draftMode: persistedState.draftMode || 'STANDARD',
@@ -99,6 +102,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         matchTitle: initialConfig?.matchTitle || 'Exhibition Match',
         seriesMode: initialConfig?.seriesMode || 'BO1',
         draftMode: initialConfig?.draftMode || 'STANDARD', 
+        // 从创建配置中读取 timeLimit
         timeLimit: initialConfig?.timeLimit !== undefined ? initialConfig.timeLimit : 30,
         teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
         teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
@@ -248,7 +252,7 @@ setInterval(() => {
     
     // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限，不触发)
     if (room.state.stepEndsAt > 0 && now > room.state.stepEndsAt) {
-      console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`); // 添加日志
+      console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`); 
 
       let newState = room.state;
       if (room.state.phase === 'DRAFT') {

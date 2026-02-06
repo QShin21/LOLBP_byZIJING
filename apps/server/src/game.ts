@@ -11,7 +11,6 @@ export type SeriesMode = 'BO1' | 'BO2' | 'BO3' | 'BO5';
 export type DraftMode = 'STANDARD' | 'FEARLESS';
 export type TeamId = 'TEAM_A' | 'TEAM_B';
 
-export const STEP_DURATION_MS = 30000;
 export const SPECIAL_ID_NONE = 'special_none';
 export const SPECIAL_ID_RANDOM = 'special_random';
 
@@ -463,30 +462,37 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
 
   if (!action) return state;
 
-  const newState = reduceState(state, action);
-  const duration = state.timeLimit * 1000; // 秒转毫秒
-  if (action.type === 'PAUSE_GAME') {
+    const newState = reduceState(state, action);
+
+    // 计算持续时间：如果 timeLimit 是 0，则 duration 为 0
+    const duration = (state.timeLimit || 0) * 1000;
+
+    if (action.type === 'PAUSE_GAME') {
       if (!state.paused) newState.pausedAt = now;
       else newState.pausedAt = state.pausedAt;
-  } else if (action.type === 'RESUME_GAME') {
+    } else if (action.type === 'RESUME_GAME') {
       if (state.pausedAt) {
-          newState.stepEndsAt = state.stepEndsAt + (now - state.pausedAt);
-          newState.pausedAt = undefined;
+        // 恢复时，把暂停的时间补回来
+        newState.stepEndsAt = state.stepEndsAt + (now - state.pausedAt);
+        newState.pausedAt = undefined;
       }
-  } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
-      if (action.type === 'START_GAME') {
-          newState.stepEndsAt = duration > 0 ? now + duration : 0;
-      } else if (state.phase === 'DRAFT' && newState.phase === 'SWAP') {
-          newState.stepEndsAt = duration > 0 ? now + duration : 0; 
-      } else if (newState.phase === 'DRAFT') {
-          newState.stepEndsAt = duration > 0 ? now + duration : 0;
+    } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
+      // 只有在这些动作发生时，才重置倒计时
+      const shouldResetTimer = 
+      action.type === 'START_GAME' || 
+      (state.phase === 'DRAFT' && newState.phase === 'DRAFT') || // Ban/Pick 动作
+      (state.phase === 'DRAFT' && newState.phase === 'SWAP');    // 进入 Swap 阶段
+
+      if (shouldResetTimer) {
+        // 如果 duration > 0，则设置截止时间；否则设为 0 (无上限)
+        newState.stepEndsAt = duration > 0 ? now + duration : 0;
       } else {
-        // Swap 阶段内部动作不重置时间
+        // Swap 内部动作不重置时间
         newState.stepEndsAt = state.stepEndsAt;
       }
-  } else if (newState.phase === 'FINISHED') {
+    } else if (newState.phase === 'FINISHED') {
       newState.stepEndsAt = 0;
-  }
+    }
 
   newState.history = [...state.history, action];
   return newState;
@@ -499,13 +505,13 @@ export const replay = (history: DraftAction[], now: number): DraftState => {
     }
     state.history = history;
     
-    // 这里的 duration 也需要从 state 取
-    const duration = state.timeLimit * 1000; 
+    // 同样使用 stored state 中的 timeLimit
+    const duration = (state.timeLimit || 0) * 1000;
 
     if (state.status === 'RUNNING' && state.phase !== 'FINISHED' && !state.paused) {
-        state.stepEndsAt = duration > 0 ? now + duration : 0; // <--- 修改这里
+      state.stepEndsAt = duration > 0 ? now + duration : 0;
     } else {
-        state.stepEndsAt = 0;
+      state.stepEndsAt = 0;
     }
     return state;
 }

@@ -50,6 +50,7 @@ export interface DraftState {
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
+  timeLimit: number; // <--- 新增：每回合秒数 (0 代表无上限)
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number; 
@@ -75,12 +76,84 @@ export interface DraftState {
   pausedAt?: number;
 }
 
-interface Hero { id: string; }
-const HERO_IDS = [
-  'aatrox', 'ahri', 'akali', 'amumu', 'annie', 'ashe', 'blitz', 'caitlyn', 'camille', 'darius', 
-  'ezreal', 'fiora', 'garen', 'jinx', 'kaisa', 'leesin', 'leona', 'lux', 'malphite', 'masteryi', 
-  'missfortune', 'nautilus', 'sett', 'teemo', 'thresh', 'vi', 'viego', 'yasuo', 'yone', 'zed'
+// =========================================================
+// HERO IDS (Front/Back-end Single Source of Truth)
+// =========================================================
+// 目标：后端 random / 校验 所用的英雄池，与你前端展示的英雄池同源。
+// 做法：在服务端启动时“同步加载”前端英雄数据模块，并从中提取 id。
+//
+// ✅ 推荐目录结构（任意其一即可）：
+//   1) shared/heroes.ts        （前后端都 import 同一份）
+//   2) src/data/heroes.ts      （前端已有英雄数据，后端直接 require 读取）
+//
+// 下面的 loader 会按顺序尝试多个路径/导出名，保证你不用改太多代码。
+// 如果你的项目路径不同，只需要在 CANDIDATE_MODULE_PATHS 里加一行。
+
+import { createRequire } from 'module';
+
+type HeroLike = { id: string };
+
+const require = createRequire(import.meta.url);
+
+const CANDIDATE_MODULE_PATHS = [
+  // ✅ 最推荐：你新增一个 shared/heroes.ts，让前后端同源
+  '../shared/heroes',
+  './shared/heroes',
+
+  // ✅ 常见：直接复用前端的 src/data/heroes
+  '../src/data/heroes',
+  './src/data/heroes',
+  '../data/heroes',
+  './data/heroes',
 ];
+
+function extractHeroIdsFromModule(mod: any): string[] {
+  // 兼容几种常见导出：HEROES / RAW_HEROES / default
+  const candidates = [mod?.HEROES, mod?.RAW_HEROES, mod?.default].filter(Boolean);
+  for (const c of candidates) {
+    if (Array.isArray(c)) {
+      const ids = c
+        .map((h: HeroLike) => (typeof h?.id === 'string' ? h.id : ''))
+        .filter((s: string) => !!s);
+      if (ids.length) return ids;
+    }
+  }
+
+  // 兼容：模块里直接导出 HERO_IDS
+  if (Array.isArray(mod?.HERO_IDS) && mod.HERO_IDS.length) {
+    return mod.HERO_IDS.filter((s: any) => typeof s === 'string' && s.length > 0);
+  }
+
+  return [];
+}
+
+function loadHeroIdsOrThrow(): string[] {
+  const errors: string[] = [];
+  for (const p of CANDIDATE_MODULE_PATHS) {
+    try {
+      const mod = require(p);
+      const ids = extractHeroIdsFromModule(mod);
+      if (ids.length) return ids;
+      errors.push(`${p}: module loaded but no hero ids exported (HEROES/RAW_HEROES/HERO_IDS/default)`);
+    } catch (e: any) {
+      errors.push(`${p}: ${e?.message ?? String(e)}`);
+    }
+  }
+  throw new Error(
+    [
+      '[game.ts] Failed to load hero ids from front-end source.',
+      'Tried paths:',
+      ...errors.map((s) => `  - ${s}`),
+      '',
+      'Fix options:',
+      '  - (Recommended) create shared/heroes.ts exporting HEROES (array of {id}) or HERO_IDS, and ensure server can import it;',
+      '  - OR adjust CANDIDATE_MODULE_PATHS to point to your existing front-end heroes module;',
+    ].join('\n')
+  );
+}
+
+// ✅ 后端随机、校验等全部使用同一份 HERO_IDS
+const HERO_IDS: string[] = loadHeroIdsOrThrow();
 
 const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
   { side: 'BLUE', type: 'BAN' }, { side: 'RED', type: 'BAN' },
@@ -99,6 +172,7 @@ export const INITIAL_STATE: DraftState = {
   matchTitle: '',
   seriesMode: 'BO1',
   draftMode: 'STANDARD',
+  timeLimit: 30, // <--- 新增：默认 30s
   teamA: { name: 'Team A', wins: 0 },
   teamB: { name: 'Team B', wins: 0 },
   currentGameIdx: 1,
@@ -397,7 +471,7 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
   if (!action) return state;
 
   const newState = reduceState(state, action);
-  
+  const duration = state.timeLimit * 1000; // 秒转毫秒
   if (action.type === 'PAUSE_GAME') {
       if (!state.paused) newState.pausedAt = now;
       else newState.pausedAt = state.pausedAt;
@@ -408,11 +482,11 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
       }
   } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
       if (action.type === 'START_GAME') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
+          newState.stepEndsAt = duration > 0 ? now + duration : 0;
       } else if (state.phase === 'DRAFT' && newState.phase === 'SWAP') {
-          newState.stepEndsAt = now + STEP_DURATION_MS; 
+          newState.stepEndsAt = duration > 0 ? now + duration : 0; 
       } else if (newState.phase === 'DRAFT') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
+          newState.stepEndsAt = duration > 0 ? now + duration : 0;
       } else {
         // Swap 阶段内部动作不重置时间
         newState.stepEndsAt = state.stepEndsAt;
@@ -431,8 +505,12 @@ export const replay = (history: DraftAction[], now: number): DraftState => {
         state = reduceState(state, action);
     }
     state.history = history;
+    
+    // 这里的 duration 也需要从 state 取
+    const duration = state.timeLimit * 1000; 
+
     if (state.status === 'RUNNING' && state.phase !== 'FINISHED' && !state.paused) {
-        state.stepEndsAt = now + STEP_DURATION_MS;
+        state.stepEndsAt = duration > 0 ? now + duration : 0; // <--- 修改这里
     } else {
         state.stepEndsAt = 0;
     }

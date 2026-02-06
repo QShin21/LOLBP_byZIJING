@@ -30,25 +30,19 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
     
     if (persistedState) {
       console.log(`Restored room from Disk: ${roomId}`);
-      
       const safeState: DraftState = {
         ...INITIAL_STATE, 
         ...persistedState,
-        
         teamA: persistedState.teamA || { name: 'Team A', wins: 0 },
         teamB: persistedState.teamB || { name: 'Team B', wins: 0 },
         sides: persistedState.sides || { TEAM_A: null, TEAM_B: null },
         seriesHistory: Array.isArray(persistedState.seriesHistory) ? persistedState.seriesHistory : [],
-        
-        // 确保读取存档中的 timeLimit，如果没有则默认为 30
         timeLimit: persistedState.timeLimit !== undefined ? persistedState.timeLimit : 30,
-        
         matchTitle: persistedState.matchTitle || '',
         seriesMode: persistedState.seriesMode || 'BO1',
         draftMode: persistedState.draftMode || 'STANDARD',
         status: persistedState.status || 'NOT_STARTED',
         phase: persistedState.phase || 'DRAFT',
-        
         blueBans: persistedState.blueBans || [],
         redBans: persistedState.redBans || [],
         bluePicks: persistedState.bluePicks || [],
@@ -65,7 +59,6 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         safeState.redPicks = [];
         safeState.stepEndsAt = 0;
       }
-
       if (!safeState.sides) safeState.sides = { TEAM_A: null, TEAM_B: null };
       if (safeState.sides.TEAM_A === undefined) safeState.sides.TEAM_A = null;
       if (safeState.sides.TEAM_B === undefined) safeState.sides.TEAM_B = null;
@@ -76,9 +69,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         clients: new Set(),
         lastActivity: Date.now()
       };
-      
       saveRoomState(roomId, safeState);
-      
     } else {
       console.log(`Creating new room: ${roomId}`);
       const initialState: DraftState = { 
@@ -89,17 +80,14 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         paused: false, 
         stepEndsAt: 0,
         lastActionSeq: 0,
-        
         matchTitle: initialConfig?.matchTitle || 'Exhibition Match',
         seriesMode: initialConfig?.seriesMode || 'BO1',
         draftMode: initialConfig?.draftMode || 'STANDARD', 
-        // 从创建配置中读取 timeLimit
         timeLimit: initialConfig?.timeLimit !== undefined ? initialConfig.timeLimit : 30,
         teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
         teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
         sides: { TEAM_A: null, TEAM_B: null },
       };
-      
       room = {
         id: roomId,
         state: initialState,
@@ -114,9 +102,11 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
 };
 
 const broadcastToRoom = (room: Room) => {
+  // ✅ 修复：附带服务器当前时间戳，用于客户端校准
   const message = JSON.stringify({
     type: 'STATE_SYNC',
-    payload: room.state
+    payload: room.state,
+    timestamp: Date.now() 
   });
   
   room.clients.forEach(client => {
@@ -142,9 +132,7 @@ const server = createServer((req, res) => {
       try {
         const config = JSON.parse(body || '{}');
         const roomId = Math.random().toString(36).substring(2, 8);
-        
         getOrCreateRoom(roomId, config); 
-
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ roomId }));
       } catch (e) {
@@ -177,7 +165,12 @@ wss.on('connection', (ws, req) => {
   
   room.clients.add(ws);
   
-  ws.send(JSON.stringify({ type: 'STATE_SYNC', payload: room.state }));
+  // ✅ 修复：连接时也发送带时间戳的同步包
+  ws.send(JSON.stringify({ 
+    type: 'STATE_SYNC', 
+    payload: room.state,
+    timestamp: Date.now() 
+  }));
 
   ws.on('message', (message) => {
     try {
@@ -239,13 +232,12 @@ setInterval(() => {
     if (room.state.paused) return;
     if (room.state.status !== 'RUNNING') return; 
     
-    // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限，不触发)
+    // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限)
     if (room.state.stepEndsAt > 0 && now > room.state.stepEndsAt) {
       console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`); 
 
       let newState = room.state;
       if (room.state.phase === 'DRAFT') {
-        // 触发随机逻辑
         newState = applyAction(room.state, { heroId: SPECIAL_ID_RANDOM, actorRole: 'REFEREE' }, now);
       } else if (room.state.phase === 'SWAP') {
         newState = applyAction(room.state, { type: 'FINISH_SWAP', actorRole: 'REFEREE' }, now);

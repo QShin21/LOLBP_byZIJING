@@ -93,17 +93,11 @@ export interface DraftState {
 type HeroLike = { id: string };
 
 const CANDIDATE_MODULE_PATHS = [
-  // ✅ 最推荐：你新增一个 shared/heroes.ts，让前后端同源
-  '../shared/heroes',
-  './shared/heroes',
+  // ✅ 方案A：优先读取编译后的 JS 文件 (位于 dist/data/heroes.js)
   './data/heroes',
-  '../src/data/heroes',
-
-  // ✅ 常见：直接复用前端的 src/data/heroes
-  '../src/data/heroes',
-  './src/data/heroes',
-  '../data/heroes',
-  './data/heroes',
+  
+  // ✅ 方案B：或者读取源码 TS 文件 (位于 src/data/heroes.ts)
+  '../src/data/heroes', 
 ];
 
 function extractHeroIdsFromModule(mod: any): string[] {

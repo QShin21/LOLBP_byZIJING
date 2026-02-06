@@ -246,14 +246,19 @@ setInterval(() => {
     if (room.state.paused) return;
     if (room.state.status !== 'RUNNING') return; 
     
-    if (now > room.state.stepEndsAt && room.state.stepEndsAt > 0) {
+    // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限，不触发)
+    if (room.state.stepEndsAt > 0 && now > room.state.stepEndsAt) {
+      console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`); // 添加日志
+
       let newState = room.state;
       if (room.state.phase === 'DRAFT') {
+        // 触发随机逻辑
         newState = applyAction(room.state, { heroId: SPECIAL_ID_RANDOM, actorRole: 'REFEREE' }, now);
       } else if (room.state.phase === 'SWAP') {
         newState = applyAction(room.state, { type: 'FINISH_SWAP', actorRole: 'REFEREE' }, now);
       }
 
+      // 如果状态发生了变化，保存并广播
       if (newState !== room.state) {
         const newAction = newState.history[newState.history.length - 1];
         if (newAction) saveActionAndUpdateState(room.id, newAction, newState);

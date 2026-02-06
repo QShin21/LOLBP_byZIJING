@@ -89,11 +89,8 @@ export interface DraftState {
 // 下面的 loader 会按顺序尝试多个路径/导出名，保证你不用改太多代码。
 // 如果你的项目路径不同，只需要在 CANDIDATE_MODULE_PATHS 里加一行。
 
-import { createRequire } from 'module';
 
 type HeroLike = { id: string };
-
-const require = createRequire(import.meta.url);
 
 const CANDIDATE_MODULE_PATHS = [
   // ✅ 最推荐：你新增一个 shared/heroes.ts，让前后端同源

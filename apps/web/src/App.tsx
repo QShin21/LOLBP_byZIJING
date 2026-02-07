@@ -23,6 +23,7 @@ import {
 // ✅ 从 data/heroes.ts 导入（该文件由脚本生成，包含 nameCn / titleCn）
 import { RAW_HEROES as RAW_HEROES_DATA, Hero as DataHero } from './data/heroes';
 import { pinyin, match } from 'pinyin-pro';
+
 // ==========================================
 // MODULE: Types & Constants
 // ==========================================
@@ -52,7 +53,7 @@ type UserRole = 'REFEREE' | 'SPECTATOR' | TeamId;
 const SPECIAL_ID_NONE = 'special_none';
 const SPECIAL_ID_RANDOM = 'special_random';
 
-// ✅ App 内使用的 Hero 类型：包含脚本生成的中英文信息，并把 roles 收窄到 Role[]
+// ✅ App 内使用的 Hero 类型
 type Hero = Omit<DataHero, 'roles'> & { roles: Role[] };
 
 interface DraftStep {
@@ -87,6 +88,7 @@ interface DraftState {
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
+  timeLimit: number; // ✅ 确保这里有 timeLimit
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number;
@@ -115,8 +117,6 @@ interface DraftState {
 // MODULE: Helpers & Data
 // ==========================================
 
-// PURE LOCAL MODE
-// Images must be located in: apps/web/public/heroes/{id}.png
 const LOCAL_IMG_BASE = '/heroes';
 
 const getHeroImageUrl = (hero: Hero | undefined | null) => {
@@ -173,13 +173,12 @@ const getHeroDisplayName = (h: Hero | null | undefined) => {
   return h.titleCn || h.nameCn || h.name;
 };
 
-// ✅ 搜索支持：英文名 / 中文名 / 中文称号
 // --- fuzzy search helpers ---
 const _norm = (s: string) =>
   (s || '')
     .toLowerCase()
     .replace(/\s+/g, '')
-    .replace(/[·'’"“”、,，.。!！?？:：;；()（）\[\]{}<>《》\-_/\\|&]/g, '');
+    .replace(/[·'’"“”、,，.。!！?？:：;；()（）[\]{}<>《》\-_/\\|&]/g, ''); // Fix: removed escape for []
 
 const _hasHan = (s: string) => /[\u4e00-\u9fff]/.test(s);
 
@@ -191,15 +190,15 @@ const _lev = (a: string, b: string) => {
   const dp = new Array(n + 1);
   for (let j = 0; j <= n; j++) dp[j] = j;
   for (let i = 1; i <= m; i++) {
-    let prev = dp[0]; // dp[i-1][j-1]
-    dp[0] = i;        // dp[i][0]
+    let prev = dp[0]; 
+    dp[0] = i;        
     for (let j = 1; j <= n; j++) {
       const tmp = dp[j];
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
       dp[j] = Math.min(
-        dp[j] + 1,      // deletion
-        dp[j - 1] + 1,  // insertion
-        prev + cost     // substitution
+        dp[j] + 1,      
+        dp[j - 1] + 1,  
+        prev + cost     
       );
       prev = tmp;
     }
@@ -207,7 +206,6 @@ const _lev = (a: string, b: string) => {
   return dp[n];
 };
 
-// fuzzy substring: allow small typos (edit distance) against any substring
 const _fuzzySubstr = (hayRaw: string, needleRaw: string, maxDist: number) => {
   const hay = _norm(hayRaw);
   const needle = _norm(needleRaw);
@@ -217,7 +215,6 @@ const _fuzzySubstr = (hayRaw: string, needleRaw: string, maxDist: number) => {
   const n = needle.length;
   if (!n) return true;
 
-  // try windows with len n-1, n, n+1 (tolerate missing/extra char)
   const lens = [Math.max(1, n - 1), n, n + 1];
 
   for (const L of lens) {
@@ -230,7 +227,6 @@ const _fuzzySubstr = (hayRaw: string, needleRaw: string, maxDist: number) => {
   return false;
 };
 
-// threshold by query length
 const _distLimit = (q: string) => {
   const len = _norm(q).length;
   if (len <= 3) return 1;
@@ -238,7 +234,6 @@ const _distLimit = (q: string) => {
   return 3;
 };
 
-// cache computed fields per hero id (avoid recalculating pinyin all the time)
 const _SEARCH_CACHE = new Map<string, { cn: string; en: string; py: string; ini: string }>();
 const _getSearchMeta = (h: Hero) => {
   const cached = _SEARCH_CACHE.get(h.id);
@@ -247,8 +242,8 @@ const _getSearchMeta = (h: Hero) => {
   const cnRaw = `${h.titleCn || ''}${h.nameCn || ''}`;
   const enRaw = `${h.id} ${h.name || ''} ${h.nameCn || ''} ${h.titleCn || ''}`;
 
-  const pyRaw = pinyin(cnRaw, { toneType: 'none' }); // e.g. "an yi jian mo"
-  const iniRaw = pinyin(cnRaw, { pattern: 'initial', toneType: 'none' }); // e.g. "a y j m" :contentReference[oaicite:2]{index=2}
+  const pyRaw = pinyin(cnRaw, { toneType: 'none' });
+  const iniRaw = pinyin(cnRaw, { pattern: 'initial', toneType: 'none' });
 
   const meta = {
     cn: _norm(cnRaw),
@@ -260,7 +255,6 @@ const _getSearchMeta = (h: Hero) => {
   return meta;
 };
 
-// ✅ Enhanced: 中文/拼音/首字母 + 容错模糊
 const matchesSearch = (h: Hero, term: string) => {
   const raw = (term || '').trim();
   if (!raw) return true;
@@ -271,54 +265,33 @@ const matchesSearch = (h: Hero, term: string) => {
   const { cn, en, py, ini } = _getSearchMeta(h);
   const limit = _distLimit(q);
 
-// 1) 直接中文输入：支持“称号/中文名”的模糊 + 同音(拼音)匹配
   if (_hasHan(raw)) {
     const qCn = _norm(raw);
     if (!qCn) return true;
-
-    // ✅ 1) 中文只做“包含”，不做编辑距离（大幅减少误匹配）
     if (cn.includes(qCn)) return true;
-
-    // ✅ 2) 同音：中文 -> 拼音，但启用条件更严格
-    // - 至少 2 个汉字
     const hanCount = (raw.match(/[\u4e00-\u9fff]/g) || []).length;
     if (hanCount < 2) return false;
-
-    const qpy = _norm(pinyin(raw, { toneType: 'none' })); // 朗姆 -> langmu
+    const qpy = _norm(pinyin(raw, { toneType: 'none' })); 
     if (!qpy || qpy.length < 4) return false;
-
-    // 只做包含/前缀（不做拼音编辑距离）
     if (py.includes(qpy) || py.startsWith(qpy)) return true;
-
-    // ✅ 3) 首字母：仅对 2~4 个汉字启用，并且只做 startsWith
     if (hanCount <= 4) {
-      const qini = _norm(pinyin(raw, { pattern: 'initial', toneType: 'none' })); // 朗姆 -> lm
+      const qini = _norm(pinyin(raw, { pattern: 'initial', toneType: 'none' })); 
       if (qini && qini.length >= 2 && ini.startsWith(qini)) return true;
     }
     return false;
   }
 
-
-
-  // 2) 英文/拼音输入：
-  // 2.1 英文 alias / id / 英文名
   if (en.includes(q)) return true;
   if (_fuzzySubstr(en, q, Math.min(2, limit))) return true;
-
-  // 2.2 拼音全拼/首字母（含容错）
   if (py.includes(q) || ini.includes(q)) return true;
 
-  // pinyin-pro 自带匹配：支持 "zwp" / "zhongwp" / "zhongwenpin" 这种混合规则 :contentReference[oaicite:3]{index=3}
   const cnText = (h.titleCn || h.nameCn || '');
   try {
     const hit = match(cnText, q);
     if (hit && hit.length) return true;
   } catch {}
 
-  // 容错：对拼音串做 fuzzy substring（打错 1~2 个字母、漏字也能搜到）
   if (_fuzzySubstr(py, q, limit)) return true;
-
-  // 首字母一般很短，容错给 1 就够（避免误匹配太多）
   if (_fuzzySubstr(ini, q, 1)) return true;
 
   return false;
@@ -331,7 +304,7 @@ const matchesSearch = (h: Hero, term: string) => {
 
 const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: (id: string) => void }) => {
   const [activeTab, setActiveTab] = useState<'CREATE' | 'JOIN'>('CREATE');
-  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' });
+  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' ,timeLimit: 30 });
   const [joinId, setJoinId] = useState('');
 
   return (
@@ -455,6 +428,25 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
               </div>
             </div>
 
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Time Per Turn</label>
+              <div className="flex gap-2">
+                {[30, 60, 90, 0].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setConfig({ ...config, timeLimit: t })}
+                    className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                      config.timeLimit === t
+                        ? 'bg-purple-600/90 border-purple-600 text-white shadow-md shadow-purple-900/20'
+                        : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                    }`}
+                  >
+                    {t === 0 ? '∞' : `${t}s`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <button
               onClick={() => onCreate(config)}
               className="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-white py-3.5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-yellow-900/15 transition-transform hover:scale-[1.01] active:scale-[0.99]"
@@ -547,7 +539,7 @@ const HeroCard = ({ hero, status, onClick, isHovered, isFearlessBanned }: any) =
 
   const imageUrl = useMemo(() => getHeroImageUrl(hero), [hero]);
 
-  const primary = hero?.titleCn || hero?.nameCn || hero?.name; // ✅ 优先称号
+  const primary = hero?.titleCn || hero?.nameCn || hero?.name; 
   const secondary = hero?.titleCn ? (hero?.nameCn || hero?.name) : (hero?.name ? `(${hero.name})` : '');
 
   const clickable = !isFearlessBanned && status === 'AVAILABLE';
@@ -720,12 +712,12 @@ const TeamPanel = ({
           const isSwapMode = phase === 'SWAP';
           const allowClick = isSwapMode && hero && canInteract;
 
-          return (//左右英雄框
+          return (
             <div
               key={i}
               onClick={() => (allowClick ? onSwapClick(side, i) : undefined)}
               className={[
-                'h-[108px] w-full rounded-2xl border overflow-hidden relative',//左右两侧已选英雄框高
+                'h-[108px] w-full rounded-2xl border overflow-hidden relative',
                 'bg-slate-900/55 backdrop-blur',
                 isSwapSelected ? 'border-green-400/80 ring-2 ring-green-400/30' : 'border-slate-700/50',
                 allowClick ? 'cursor-pointer hover:bg-slate-800/60 hover:border-slate-500/60' : '',
@@ -799,7 +791,7 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
   const redTeamName = game.redSideTeam === 'TEAM_A' ? state.teamA?.name : state.teamB?.name;
   const winnerName = game.winner === 'TEAM_A' ? state.teamA?.name : state.teamB?.name;
 
-  const renderMini = (id: string, kind: 'BAN' | 'PICK') => {//结束战报界面
+  const renderMini = (id: string, kind: 'BAN' | 'PICK') => {
     const hero = getHero(id);
     const img = hero ? getHeroImageUrl(hero) : null;
     const title = hero ? getHeroDisplayName(hero) : '';
@@ -861,7 +853,9 @@ export default function App() {
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
 
-  const [lastSeenSeq, setLastSeenSeq] = useState<number>(0);
+  const lastSeenSeqRef = useRef<number>(0);
+  const clockOffsetRef = useRef<number>(0); // server_time - client_time (ms)
+  const lastStepEndsAtRef = useRef<number>(0);
   const [, setMissedActions] = useState<DraftAction[]>([]);
 
   useEffect(() => {
@@ -871,43 +865,132 @@ export default function App() {
     }
   }, [toast]);
 
+
   // WS Connection
   useEffect(() => {
     if (!roomId) return;
-    //const ws = new WebSocket(`ws://localhost:8080?room=${roomId}`);
-    const ws = new WebSocket(`wss://zijing.yejiaxin.online?room=${roomId}`);
-    wsRef.current = ws;
 
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
+    let ws: WebSocket | null = null;
+    let alive = true;
+    let retry = 0;
+    let pingTimer: number | null = null;
+    let reconnectTimer: number | null = null;
 
-    ws.onmessage = async (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'STATE_SYNC') {
-          const ns = msg.payload as DraftState;
-          if (lastSeenSeq > 0 && ns.lastActionSeq > lastSeenSeq + 1) {
-            //const res = await fetch(`http://localhost:8080/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
-            const res = await fetch(`https://zijing.yejiaxin.online/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
-            const data = await res.json();
-            if (data.actions?.length) setMissedActions((prev) => [...prev, ...data.actions]);
-          }
-          setLastSeenSeq(ns.lastActionSeq);
-          setState(ns);
-        } else if (msg.type === 'ACTION_REJECTED') {
-          setToast({ msg: msg.payload.reason, type: 'error' });
-        }
-      } catch (e) {
-        console.error(e);
+    const cleanupTimers = () => {
+      if (pingTimer) {
+        window.clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
       }
     };
 
-    return () => ws.close();
-  }, [roomId, lastSeenSeq]);
+    const connect = () => {
+      if (!alive) return;
+
+      ws = new WebSocket(`wss://zijing.yejiaxin.online?room=${roomId}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setIsConnected(true);
+        retry = 0;
+
+        // 应用层 keepalive，避免长时间无消息导致的 WebSocket 空闲超时断开
+        cleanupTimers();
+        pingTimer = window.setInterval(() => {
+          try {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PING' }));
+          } catch {}
+        }, 25000);
+      };
+
+      ws.onclose = () => {
+        setIsConnected(false);
+        cleanupTimers();
+
+        if (!alive) return;
+
+        const delay = Math.min(10000, 1000 * Math.pow(2, retry));
+        retry = Math.min(retry + 1, 4);
+        reconnectTimer = window.setTimeout(() => connect(), delay);
+      };
+
+      ws.onerror = () => {
+        // 交给 onclose 做重连
+      };
+
+      ws.onmessage = async (event) => {
+        const clientReceivedAt = Date.now();
+        try {
+          const msg = JSON.parse(event.data);
+
+          // 时钟校准：优先用服务器下发的 timestamp
+          if (typeof msg.timestamp === 'number') {
+            const est = msg.timestamp - clientReceivedAt;
+            clockOffsetRef.current =
+              clockOffsetRef.current === 0 ? est : Math.round(clockOffsetRef.current * 0.8 + est * 0.2);
+          }
+
+          if (msg.type === 'STATE_SYNC') {
+            const ns = msg.payload as DraftState;
+
+            // 没有 timestamp 时，用 stepEndsAt + timeLimit 做一次近似校准（只在 stepEndsAt 变化时触发）
+            if (
+              typeof msg.timestamp !== 'number' &&
+              ns?.stepEndsAt &&
+              ns.stepEndsAt > 0 &&
+              ns.timeLimit > 0 &&
+              ns.stepEndsAt !== lastStepEndsAtRef.current
+            ) {
+              const est = ns.stepEndsAt - clientReceivedAt - ns.timeLimit * 1000;
+              clockOffsetRef.current =
+                clockOffsetRef.current === 0 ? est : Math.round(clockOffsetRef.current * 0.8 + est * 0.2);
+              lastStepEndsAtRef.current = ns.stepEndsAt;
+            } else if (ns?.stepEndsAt !== lastStepEndsAtRef.current) {
+              lastStepEndsAtRef.current = ns?.stepEndsAt || 0;
+            }
+
+            // 补拉丢失的 action（可选）
+            const last = lastSeenSeqRef.current;
+            if (last > 0 && ns.lastActionSeq > last + 1) {
+              const res = await fetch(`https://zijing.yejiaxin.online/rooms/${roomId}/actions?afterSeq=${last}`);
+              const data = await res.json();
+              if (data.actions?.length) setMissedActions((prev) => [...prev, ...data.actions]);
+            }
+            lastSeenSeqRef.current = ns.lastActionSeq;
+
+            setState(ns);
+          } else if (msg.type === 'ACTION_REJECTED') {
+            setToast({ msg: msg.payload.reason, type: 'error' });
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      alive = false;
+      cleanupTimers();
+      try {
+        ws?.close();
+      } catch {}
+    };
+  }, [roomId]);
+
 
   const send = (type: string, payload: any = {}) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type, payload: { ...payload, actorRole: userRole } }));
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type, payload: { ...payload, actorRole: userRole } }));
+      return;
+    }
+    setToast({ msg: '连接已断开，正在重连', type: 'error' });
   };
+
 
   // Helpers
   const currentStep = useMemo(() => (state ? getCurrentStep(state) : null), [state]);
@@ -936,42 +1019,64 @@ export default function App() {
     return false;
   }, [state, isReferee, currentStep, mySide]);
 
+  // ✅ 1. 优化：将 fearlessBannedHeroes 提前计算，防止在 event handler 中由于作用域问题取不到
+  const fearlessBannedHeroes = useMemo(() => {
+    const set = new Set<string>();
+    if (state && state.draftMode === 'FEARLESS' && state.seriesHistory) {
+      state.seriesHistory.forEach((game) => {
+        game.bluePicks.forEach((id) => set.add(id));
+        game.redPicks.forEach((id) => set.add(id));
+      });
+    }
+    return set;
+  }, [state]);
+
   // Timer
   useEffect(() => {
-    if (!state || state.status !== 'RUNNING' || state.paused) {
-      if (state?.paused && state.pausedAt) setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
-      else setTimeLeft(0);
+    // 无限制 或没有 stepEndsAt 或非 RUNNING
+    if (!state || state.status !== 'RUNNING' || state.timeLimit === 0 || state.stepEndsAt === 0) {
+      // 暂停时显示暂停瞬间剩余
+      if (state?.paused && state.pausedAt && state.stepEndsAt > 0) {
+        setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
+      } else {
+        setTimeLeft(0);
+      }
       return;
     }
-    const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - Date.now()) / 1000))), 200);
-    return () => clearInterval(i);
-  }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt]);
+
+    // 暂停：stepEndsAt 与 pausedAt 都是服务器时间戳，直接算
+    if (state.paused) {
+      if (state.pausedAt && state.stepEndsAt > 0) {
+        setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
+      } else {
+        setTimeLeft(0);
+      }
+      return;
+    }
+
+    const tick = () => {
+      // 把本地时间换算到服务器时间，再去减 stepEndsAt
+      const serverNow = Date.now() + clockOffsetRef.current;
+      setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - serverNow) / 1000)));
+    };
+
+    tick();
+    const i = window.setInterval(tick, 200);
+    return () => window.clearInterval(i);
+  }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt, state?.timeLimit]);
+
 
   // Actions
   const handleLock = () => {
-  if (!hoveredHeroId || !canInteract) return;
+    if (!hoveredHeroId || !canInteract) return;
 
-  let heroIdToSend = hoveredHeroId;
+    // ✅ 2. 优化：如果选择 RANDOM，不再由前端自己算，直接发 SPECIAL_ID_RANDOM 给后端
+    // 这样能保证前后端数据一致性，利用后端的 game.ts 逻辑来处理
+    const heroIdToSend = hoveredHeroId;
 
-  // ✅ 前端展开 RANDOM
-  if (hoveredHeroId === SPECIAL_ID_RANDOM && (currentStep?.type === 'PICK' || currentStep?.type === 'BAN')) {
-    const pool = HEROES
-      .filter((h) => !h.id.startsWith('special_'))               // 排除 special
-      .filter((h) => !usedHeroes.has(h.id))                      // 排除已被 ban/pick
-      .filter((h) => !fearlessBannedHeroes.has(h.id));           // 排除 fearless 禁用
-
-    if (pool.length === 0) {
-      setToast({ msg: '没有可随机的英雄（都已被占用/禁用）', type: 'error' });
-      return;
-    }
-
-    heroIdToSend = pool[Math.floor(Math.random() * pool.length)].id;
-  }
-
-  send('ACTION_SUBMIT', { heroId: heroIdToSend });
-  setHoveredHeroId(null);
-};
-
+    send('ACTION_SUBMIT', { heroId: heroIdToSend });
+    setHoveredHeroId(null);
+  };
 
   const handleSwap = (side: Side, index: number) => {
     if (isSpectator || state?.status !== 'RUNNING' || state?.paused) return;
@@ -985,17 +1090,15 @@ export default function App() {
   };
 
   const handleCreate = async (cfg: any) => {
-    //const res = await fetch('http://localhost:8080/rooms', { method: 'POST', body: JSON.stringify(cfg) });
     const res = await fetch('https://zijing.yejiaxin.online/rooms', { method: 'POST', body: JSON.stringify(cfg) });
     const data = await res.json();
     window.history.pushState(null, '', `?room=${data.roomId}`);
     setRoomId(data.roomId);
-    // === 新增：自动复制网址并弹窗 ===
+    
     const roomUrl = `${window.location.origin}/?room=${data.roomId}`;
     navigator.clipboard.writeText(roomUrl).then(() => {
       alert(`✅ 房间已创建！\n\n网址已自动复制到剪贴板：\n${roomUrl}`);
     }).catch(() => {
-      // 如果浏览器不支持自动复制，则只弹窗显示网址
       alert(`✅ 房间已创建！\n\n请手动复制网址：\n${roomUrl}`);
     });
   };
@@ -1048,15 +1151,6 @@ export default function App() {
 
   const isBlueUser = userRole === 'REFEREE' || (teamOnBlueId && userRole === teamOnBlueId);
   const isRedUser = userRole === 'REFEREE' || (teamOnRedId && userRole === teamOnRedId);
-
-  // FEARLESS LOGIC
-  const fearlessBannedHeroes = new Set<string>();
-  if (state && state.draftMode === 'FEARLESS' && state.seriesHistory) {
-    state.seriesHistory.forEach((game) => {
-      game.bluePicks.forEach((id) => fearlessBannedHeroes.add(id));
-      game.redPicks.forEach((id) => fearlessBannedHeroes.add(id));
-    });
-  }
 
   return (
     <div className="h-screen bg-slate-950 text-slate-200 font-sans flex flex-col selection:bg-yellow-500/30 relative overflow-hidden">
@@ -1121,14 +1215,16 @@ export default function App() {
                     {currentStep.side} {currentStep.type}
                   </span>
                   <span className="text-slate-600">|</span>
-                  <span className="text-slate-100">{timeLeft}s</span>
+                  <span className="text-slate-100">
+                    {state.timeLimit === 0 ? '∞' : `${timeLeft}s`}
+                  </span>
                 </div>
               )
             ) : state.phase === 'SWAP' ? (
               <div className="text-xl font-black flex gap-2 text-yellow-400 animate-pulse">
                 <span>SWAP PHASE</span>
                 <span className="text-slate-600">|</span>
-                <span>{timeLeft}s</span>
+                <span>{state.timeLimit === 0 ? '∞' : `${timeLeft}s`}</span>
               </div>
             ) : null
           )}
@@ -1338,6 +1434,7 @@ export default function App() {
                             ) : img ? (
                               <>
                                 <img src={img} className="w-full h-full object-cover grayscale opacity-80" />
+                                <div className="absolute inset-0 bg-black/20" />
                                 <Ban className="absolute w-7 h-7 text-red-600 drop-shadow" />
                               </>
                             ) : (
@@ -1379,6 +1476,7 @@ export default function App() {
                             ) : img ? (
                               <>
                                 <img src={img} className="w-full h-full object-cover grayscale opacity-80" />
+                                <div className="absolute inset-0 bg-black/20" />
                                 <Ban className="absolute w-7 h-7 text-red-600 drop-shadow" />
                               </>
                             ) : (
@@ -1479,11 +1577,3 @@ export default function App() {
     </div>
   );
 }
-
-/**
- * Optional: Hide scrollbar utilities (Tailwind doesn't ship by default).
- * If you already have these utilities, remove this comment.
- *
- * .no-scrollbar::-webkit-scrollbar { display: none; }
- * .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
- */

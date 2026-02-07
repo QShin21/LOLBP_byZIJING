@@ -7,8 +7,7 @@ import {
   applyAction, 
   validateMove,
   replay, 
-  SPECIAL_ID_RANDOM, 
-  STEP_DURATION_MS 
+  SPECIAL_ID_RANDOM
 } from './game';
 import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions } from './db';
 
@@ -31,23 +30,19 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
     
     if (persistedState) {
       console.log(`Restored room from Disk: ${roomId}`);
-      
-      // FIX: 深度防御性合并。防止旧数据缺少字段导致前端白屏。
       const safeState: DraftState = {
         ...INITIAL_STATE, 
         ...persistedState,
-        
         teamA: persistedState.teamA || { name: 'Team A', wins: 0 },
         teamB: persistedState.teamB || { name: 'Team B', wins: 0 },
         sides: persistedState.sides || { TEAM_A: null, TEAM_B: null },
         seriesHistory: Array.isArray(persistedState.seriesHistory) ? persistedState.seriesHistory : [],
-        
+        timeLimit: persistedState.timeLimit !== undefined ? persistedState.timeLimit : 30,
         matchTitle: persistedState.matchTitle || '',
         seriesMode: persistedState.seriesMode || 'BO1',
         draftMode: persistedState.draftMode || 'STANDARD',
         status: persistedState.status || 'NOT_STARTED',
         phase: persistedState.phase || 'DRAFT',
-        
         blueBans: persistedState.blueBans || [],
         redBans: persistedState.redBans || [],
         bluePicks: persistedState.bluePicks || [],
@@ -55,22 +50,15 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         history: persistedState.history || []
       };
 
-      // -----------------------------------------------------------
-      // FIX: 关键修复 - 状态清洗 (State Sanitization)
-      // 如果状态是 NOT_STARTED，强制重置 BP 进度，防止脏数据导致 Step 溢出
-      // -----------------------------------------------------------
       if (safeState.status === 'NOT_STARTED') {
         safeState.draftStepIndex = 0;
-        safeState.stepIndex = 0; // 重置动作步数
+        safeState.stepIndex = 0;
         safeState.blueBans = [];
         safeState.redBans = [];
         safeState.bluePicks = [];
         safeState.redPicks = [];
         safeState.stepEndsAt = 0;
-        // 注意：不要重置 sides，因为选边可能在 NOT_STARTED 阶段已完成
       }
-
-      // 确保 sides 对象结构完整
       if (!safeState.sides) safeState.sides = { TEAM_A: null, TEAM_B: null };
       if (safeState.sides.TEAM_A === undefined) safeState.sides.TEAM_A = null;
       if (safeState.sides.TEAM_B === undefined) safeState.sides.TEAM_B = null;
@@ -81,10 +69,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         clients: new Set(),
         lastActivity: Date.now()
       };
-      
-      // 将清洗后的干净状态写回磁盘
       saveRoomState(roomId, safeState);
-      
     } else {
       console.log(`Creating new room: ${roomId}`);
       const initialState: DraftState = { 
@@ -95,15 +80,14 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         paused: false, 
         stepEndsAt: 0,
         lastActionSeq: 0,
-        
         matchTitle: initialConfig?.matchTitle || 'Exhibition Match',
         seriesMode: initialConfig?.seriesMode || 'BO1',
         draftMode: initialConfig?.draftMode || 'STANDARD', 
+        timeLimit: initialConfig?.timeLimit !== undefined ? initialConfig.timeLimit : 30,
         teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
         teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
         sides: { TEAM_A: null, TEAM_B: null },
       };
-      
       room = {
         id: roomId,
         state: initialState,
@@ -118,9 +102,11 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
 };
 
 const broadcastToRoom = (room: Room) => {
+  // ✅ 修复：附带服务器当前时间戳，用于客户端校准
   const message = JSON.stringify({
     type: 'STATE_SYNC',
-    payload: room.state
+    payload: room.state,
+    timestamp: Date.now() 
   });
   
   room.clients.forEach(client => {
@@ -139,7 +125,6 @@ const server = createServer((req, res) => {
 
   const url = parse(req.url || '', true);
 
-  // API: Create new room
   if (req.method === 'POST' && url.pathname === '/rooms') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -147,9 +132,7 @@ const server = createServer((req, res) => {
       try {
         const config = JSON.parse(body || '{}');
         const roomId = Math.random().toString(36).substring(2, 8);
-        
         getOrCreateRoom(roomId, config); 
-
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ roomId }));
       } catch (e) {
@@ -160,7 +143,6 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // API: Get missing actions
   if (req.method === 'GET' && url.pathname?.match(/^\/rooms\/[a-zA-Z0-9]+\/actions$/)) {
     const roomId = url.pathname.split('/')[2];
     const afterSeq = parseInt(url.query.afterSeq as string || '0', 10);
@@ -183,7 +165,12 @@ wss.on('connection', (ws, req) => {
   
   room.clients.add(ws);
   
-  ws.send(JSON.stringify({ type: 'STATE_SYNC', payload: room.state }));
+  // ✅ 修复：连接时也发送带时间戳的同步包
+  ws.send(JSON.stringify({ 
+    type: 'STATE_SYNC', 
+    payload: room.state,
+    timestamp: Date.now() 
+  }));
 
   ws.on('message', (message) => {
     try {
@@ -245,7 +232,10 @@ setInterval(() => {
     if (room.state.paused) return;
     if (room.state.status !== 'RUNNING') return; 
     
-    if (now > room.state.stepEndsAt && room.state.stepEndsAt > 0) {
+    // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限)
+    if (room.state.stepEndsAt > 0 && now > room.state.stepEndsAt) {
+      console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`); 
+
       let newState = room.state;
       if (room.state.phase === 'DRAFT') {
         newState = applyAction(room.state, { heroId: SPECIAL_ID_RANDOM, actorRole: 'REFEREE' }, now);

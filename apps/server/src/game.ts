@@ -11,7 +11,6 @@ export type SeriesMode = 'BO1' | 'BO2' | 'BO3' | 'BO5';
 export type DraftMode = 'STANDARD' | 'FEARLESS';
 export type TeamId = 'TEAM_A' | 'TEAM_B';
 
-export const STEP_DURATION_MS = 30000;
 export const SPECIAL_ID_NONE = 'special_none';
 export const SPECIAL_ID_RANDOM = 'special_random';
 
@@ -50,6 +49,7 @@ export interface DraftState {
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
+  timeLimit: number; // <--- 每回合秒数 (0 代表无上限)
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number; 
@@ -75,12 +75,67 @@ export interface DraftState {
   pausedAt?: number;
 }
 
-interface Hero { id: string; }
-const HERO_IDS = [
-  'aatrox', 'ahri', 'akali', 'amumu', 'annie', 'ashe', 'blitz', 'caitlyn', 'camille', 'darius', 
-  'ezreal', 'fiora', 'garen', 'jinx', 'kaisa', 'leesin', 'leona', 'lux', 'malphite', 'masteryi', 
-  'missfortune', 'nautilus', 'sett', 'teemo', 'thresh', 'vi', 'viego', 'yasuo', 'yone', 'zed'
+// =========================================================
+// HERO IDS (Front/Back-end Single Source of Truth)
+// =========================================================
+
+type HeroLike = { id: string };
+
+const CANDIDATE_MODULE_PATHS = [
+  // ✅ 方案A：优先读取复制到后端本地的文件 (位于 apps/server/src/data/heroes.ts)
+  './data/heroes',
+  
+  // ✅ 方案B：或者读取源码 TS 文件 (位于 apps/server/src/data/heroes.ts)
+  '../src/data/heroes', 
 ];
+
+function extractHeroIdsFromModule(mod: any): string[] {
+  // 兼容几种常见导出：HEROES / RAW_HEROES / default
+  const candidates = [mod?.HEROES, mod?.RAW_HEROES, mod?.default].filter(Boolean);
+  for (const c of candidates) {
+    if (Array.isArray(c)) {
+      const ids = c
+        .map((h: HeroLike) => (typeof h?.id === 'string' ? h.id : ''))
+        .filter((s: string) => !!s);
+      if (ids.length) return ids;
+    }
+  }
+
+  // 兼容：模块里直接导出 HERO_IDS
+  if (Array.isArray(mod?.HERO_IDS) && mod.HERO_IDS.length) {
+    return mod.HERO_IDS.filter((s: any) => typeof s === 'string' && s.length > 0);
+  }
+
+  return [];
+}
+
+function loadHeroIdsOrThrow(): string[] {
+  const errors: string[] = [];
+  for (const p of CANDIDATE_MODULE_PATHS) {
+    try {
+      // 直接使用全局 require (CommonJS)
+      const mod = require(p);
+      const ids = extractHeroIdsFromModule(mod);
+      if (ids.length) return ids;
+      errors.push(`${p}: module loaded but no hero ids exported (HEROES/RAW_HEROES/HERO_IDS/default)`);
+    } catch (e: any) {
+      errors.push(`${p}: ${e?.message ?? String(e)}`);
+    }
+  }
+  throw new Error(
+    [
+      '[game.ts] Failed to load hero ids from front-end source.',
+      'Tried paths:',
+      ...errors.map((s) => `  - ${s}`),
+      '',
+      'Fix options:',
+      '  - Ensure apps/server/src/data/heroes.ts exists (copied from web).',
+    ].join('\n')
+  );
+}
+
+// ✅ 后端随机、校验等全部使用同一份 HERO_IDS
+const HERO_IDS: string[] = loadHeroIdsOrThrow();
 
 const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
   { side: 'BLUE', type: 'BAN' }, { side: 'RED', type: 'BAN' },
@@ -99,6 +154,7 @@ export const INITIAL_STATE: DraftState = {
   matchTitle: '',
   seriesMode: 'BO1',
   draftMode: 'STANDARD',
+  timeLimit: 30, // 默认 30s
   teamA: { name: 'Team A', wins: 0 },
   teamB: { name: 'Team B', wins: 0 },
   currentGameIdx: 1,
@@ -358,7 +414,6 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
             let resolvedHeroId = payload.heroId;
             if (resolvedHeroId === SPECIAL_ID_RANDOM) {
                 const usedHeroes = new Set([...state.blueBans, ...state.redBans, ...state.bluePicks, ...state.redPicks]);
-                // Fearless Random Logic
                 const fearlessBans = getFearlessBannedIds(state);
                 
                 const available = HERO_IDS.filter(id => !usedHeroes.has(id) && !fearlessBans.has(id));
@@ -396,30 +451,37 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
 
   if (!action) return state;
 
-  const newState = reduceState(state, action);
-  
-  if (action.type === 'PAUSE_GAME') {
+    const newState = reduceState(state, action);
+
+    // 计算持续时间：如果 timeLimit 是 0，则 duration 为 0
+    const duration = (state.timeLimit || 0) * 1000;
+
+    if (action.type === 'PAUSE_GAME') {
       if (!state.paused) newState.pausedAt = now;
       else newState.pausedAt = state.pausedAt;
-  } else if (action.type === 'RESUME_GAME') {
+    } else if (action.type === 'RESUME_GAME') {
       if (state.pausedAt) {
-          newState.stepEndsAt = state.stepEndsAt + (now - state.pausedAt);
-          newState.pausedAt = undefined;
+        // 恢复时，把暂停的时间补回来
+        newState.stepEndsAt = state.stepEndsAt + (now - state.pausedAt);
+        newState.pausedAt = undefined;
       }
-  } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
-      if (action.type === 'START_GAME') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
-      } else if (state.phase === 'DRAFT' && newState.phase === 'SWAP') {
-          newState.stepEndsAt = now + STEP_DURATION_MS; 
-      } else if (newState.phase === 'DRAFT') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
+    } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
+      // 只有在这些动作发生时，才重置倒计时
+      const shouldResetTimer = 
+      action.type === 'START_GAME' || 
+      (state.phase === 'DRAFT' && newState.phase === 'DRAFT') || // Ban/Pick 动作
+      (state.phase === 'DRAFT' && newState.phase === 'SWAP');    // 进入 Swap 阶段
+
+      if (shouldResetTimer) {
+        // 如果 duration > 0，则设置截止时间；否则设为 0 (无上限)
+        newState.stepEndsAt = duration > 0 ? now + duration : 0;
       } else {
-        // Swap 阶段内部动作不重置时间
+        // Swap 内部动作不重置时间
         newState.stepEndsAt = state.stepEndsAt;
       }
-  } else if (newState.phase === 'FINISHED') {
+    } else if (newState.phase === 'FINISHED') {
       newState.stepEndsAt = 0;
-  }
+    }
 
   newState.history = [...state.history, action];
   return newState;
@@ -431,8 +493,12 @@ export const replay = (history: DraftAction[], now: number): DraftState => {
         state = reduceState(state, action);
     }
     state.history = history;
+    
+    // 这里的 duration 也需要从 state 取
+    const duration = (state.timeLimit || 0) * 1000; 
+
     if (state.status === 'RUNNING' && state.phase !== 'FINISHED' && !state.paused) {
-        state.stepEndsAt = now + STEP_DURATION_MS;
+        state.stepEndsAt = duration > 0 ? now + duration : 0; 
     } else {
         state.stepEndsAt = 0;
     }

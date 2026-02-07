@@ -853,7 +853,9 @@ export default function App() {
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
 
-  const [lastSeenSeq, setLastSeenSeq] = useState<number>(0);
+  const lastSeenSeqRef = useRef<number>(0);
+  const clockOffsetRef = useRef<number>(0); // server_time - client_time (ms)
+  const lastStepEndsAtRef = useRef<number>(0);
   const [, setMissedActions] = useState<DraftAction[]>([]);
 
   useEffect(() => {
@@ -863,41 +865,132 @@ export default function App() {
     }
   }, [toast]);
 
+
   // WS Connection
   useEffect(() => {
     if (!roomId) return;
-    const ws = new WebSocket(`wss://zijing.yejiaxin.online?room=${roomId}`);
-    wsRef.current = ws;
 
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
+    let ws: WebSocket | null = null;
+    let alive = true;
+    let retry = 0;
+    let pingTimer: number | null = null;
+    let reconnectTimer: number | null = null;
 
-    ws.onmessage = async (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'STATE_SYNC') {
-          const ns = msg.payload as DraftState;
-          if (lastSeenSeq > 0 && ns.lastActionSeq > lastSeenSeq + 1) {
-            const res = await fetch(`https://zijing.yejiaxin.online/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
-            const data = await res.json();
-            if (data.actions?.length) setMissedActions((prev) => [...prev, ...data.actions]);
-          }
-          setLastSeenSeq(ns.lastActionSeq);
-          setState(ns);
-        } else if (msg.type === 'ACTION_REJECTED') {
-          setToast({ msg: msg.payload.reason, type: 'error' });
-        }
-      } catch (e) {
-        console.error(e);
+    const cleanupTimers = () => {
+      if (pingTimer) {
+        window.clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
       }
     };
 
-    return () => ws.close();
-  }, [roomId, lastSeenSeq]);
+    const connect = () => {
+      if (!alive) return;
+
+      ws = new WebSocket(`wss://zijing.yejiaxin.online?room=${roomId}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setIsConnected(true);
+        retry = 0;
+
+        // 应用层 keepalive，避免长时间无消息导致的 WebSocket 空闲超时断开
+        cleanupTimers();
+        pingTimer = window.setInterval(() => {
+          try {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PING' }));
+          } catch {}
+        }, 25000);
+      };
+
+      ws.onclose = () => {
+        setIsConnected(false);
+        cleanupTimers();
+
+        if (!alive) return;
+
+        const delay = Math.min(10000, 1000 * Math.pow(2, retry));
+        retry = Math.min(retry + 1, 4);
+        reconnectTimer = window.setTimeout(() => connect(), delay);
+      };
+
+      ws.onerror = () => {
+        // 交给 onclose 做重连
+      };
+
+      ws.onmessage = async (event) => {
+        const clientReceivedAt = Date.now();
+        try {
+          const msg = JSON.parse(event.data);
+
+          // 时钟校准：优先用服务器下发的 timestamp
+          if (typeof msg.timestamp === 'number') {
+            const est = msg.timestamp - clientReceivedAt;
+            clockOffsetRef.current =
+              clockOffsetRef.current === 0 ? est : Math.round(clockOffsetRef.current * 0.8 + est * 0.2);
+          }
+
+          if (msg.type === 'STATE_SYNC') {
+            const ns = msg.payload as DraftState;
+
+            // 没有 timestamp 时，用 stepEndsAt + timeLimit 做一次近似校准（只在 stepEndsAt 变化时触发）
+            if (
+              typeof msg.timestamp !== 'number' &&
+              ns?.stepEndsAt &&
+              ns.stepEndsAt > 0 &&
+              ns.timeLimit > 0 &&
+              ns.stepEndsAt !== lastStepEndsAtRef.current
+            ) {
+              const est = ns.stepEndsAt - clientReceivedAt - ns.timeLimit * 1000;
+              clockOffsetRef.current =
+                clockOffsetRef.current === 0 ? est : Math.round(clockOffsetRef.current * 0.8 + est * 0.2);
+              lastStepEndsAtRef.current = ns.stepEndsAt;
+            } else if (ns?.stepEndsAt !== lastStepEndsAtRef.current) {
+              lastStepEndsAtRef.current = ns?.stepEndsAt || 0;
+            }
+
+            // 补拉丢失的 action（可选）
+            const last = lastSeenSeqRef.current;
+            if (last > 0 && ns.lastActionSeq > last + 1) {
+              const res = await fetch(`https://zijing.yejiaxin.online/rooms/${roomId}/actions?afterSeq=${last}`);
+              const data = await res.json();
+              if (data.actions?.length) setMissedActions((prev) => [...prev, ...data.actions]);
+            }
+            lastSeenSeqRef.current = ns.lastActionSeq;
+
+            setState(ns);
+          } else if (msg.type === 'ACTION_REJECTED') {
+            setToast({ msg: msg.payload.reason, type: 'error' });
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      alive = false;
+      cleanupTimers();
+      try {
+        ws?.close();
+      } catch {}
+    };
+  }, [roomId]);
+
 
   const send = (type: string, payload: any = {}) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type, payload: { ...payload, actorRole: userRole } }));
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type, payload: { ...payload, actorRole: userRole } }));
+      return;
+    }
+    setToast({ msg: '连接已断开，正在重连', type: 'error' });
   };
+
 
   // Helpers
   const currentStep = useMemo(() => (state ? getCurrentStep(state) : null), [state]);
@@ -940,9 +1033,9 @@ export default function App() {
 
   // Timer
   useEffect(() => {
-    // 如果 timeLimit 是 0（无限制），或者还没有设置 stepEndsAt（0），或者不是 RUNNING、或已暂停，则不做正常倒计时
-    if (!state || state.status !== 'RUNNING' || state.paused || state.stepEndsAt === 0 || state.timeLimit === 0) {
-      // 只有在暂停时并且 stepEndsAt 有效 (>0) 时显示暂停时的剩余时间
+    // 无限制 或没有 stepEndsAt 或非 RUNNING
+    if (!state || state.status !== 'RUNNING' || state.timeLimit === 0 || state.stepEndsAt === 0) {
+      // 暂停时显示暂停瞬间剩余
       if (state?.paused && state.pausedAt && state.stepEndsAt > 0) {
         setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
       } else {
@@ -951,10 +1044,27 @@ export default function App() {
       return;
     }
 
-    // 正常倒计时逻辑
-    const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - Date.now()) / 1000))), 200);
-    return () => clearInterval(i);
+    // 暂停：stepEndsAt 与 pausedAt 都是服务器时间戳，直接算
+    if (state.paused) {
+      if (state.pausedAt && state.stepEndsAt > 0) {
+        setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
+      } else {
+        setTimeLeft(0);
+      }
+      return;
+    }
+
+    const tick = () => {
+      // 把本地时间换算到服务器时间，再去减 stepEndsAt
+      const serverNow = Date.now() + clockOffsetRef.current;
+      setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - serverNow) / 1000)));
+    };
+
+    tick();
+    const i = window.setInterval(tick, 200);
+    return () => window.clearInterval(i);
   }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt, state?.timeLimit]);
+
 
   // Actions
   const handleLock = () => {

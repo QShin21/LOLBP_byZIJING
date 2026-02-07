@@ -1,12 +1,12 @@
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { parse } from 'url';
-import { 
-  DraftState, 
-  INITIAL_STATE, 
-  applyAction, 
+import {
+  DraftState,
+  INITIAL_STATE,
+  applyAction,
   validateMove,
-  replay, 
+  replay,
   SPECIAL_ID_RANDOM
 } from './game';
 import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions } from './db';
@@ -24,20 +24,22 @@ const rooms = new Map<string, Room>();
 
 const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
   let room = rooms.get(roomId);
-  
+
   if (!room) {
     const persistedState = getRoomState(roomId);
-    
+
     if (persistedState) {
       console.log(`Restored room from Disk: ${roomId}`);
       const safeState: DraftState = {
-        ...INITIAL_STATE, 
+        ...INITIAL_STATE,
         ...persistedState,
         teamA: persistedState.teamA || { name: 'Team A', wins: 0 },
         teamB: persistedState.teamB || { name: 'Team B', wins: 0 },
         sides: persistedState.sides || { TEAM_A: null, TEAM_B: null },
         seriesHistory: Array.isArray(persistedState.seriesHistory) ? persistedState.seriesHistory : [],
         timeLimit: persistedState.timeLimit !== undefined ? persistedState.timeLimit : 30,
+        separateSideAndBpOrder: persistedState.separateSideAndBpOrder !== undefined ? persistedState.separateSideAndBpOrder : false,
+        bpFirstTeam: persistedState.bpFirstTeam !== undefined ? persistedState.bpFirstTeam : null,
         matchTitle: persistedState.matchTitle || '',
         seriesMode: persistedState.seriesMode || 'BO1',
         draftMode: persistedState.draftMode || 'STANDARD',
@@ -72,18 +74,20 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
       saveRoomState(roomId, safeState);
     } else {
       console.log(`Creating new room: ${roomId}`);
-      const initialState: DraftState = { 
-        ...INITIAL_STATE, 
-        status: 'NOT_STARTED', 
-        blueReady: false, 
-        redReady: false, 
-        paused: false, 
+      const initialState: DraftState = {
+        ...INITIAL_STATE,
+        status: 'NOT_STARTED',
+        blueReady: false,
+        redReady: false,
+        paused: false,
         stepEndsAt: 0,
         lastActionSeq: 0,
         matchTitle: initialConfig?.matchTitle || 'Exhibition Match',
         seriesMode: initialConfig?.seriesMode || 'BO1',
-        draftMode: initialConfig?.draftMode || 'STANDARD', 
+        draftMode: initialConfig?.draftMode || 'STANDARD',
         timeLimit: initialConfig?.timeLimit !== undefined ? initialConfig.timeLimit : 30,
+        separateSideAndBpOrder: initialConfig?.separateSideAndBpOrder !== undefined ? initialConfig.separateSideAndBpOrder : false,
+        bpFirstTeam: null,
         teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
         teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
         sides: { TEAM_A: null, TEAM_B: null },
@@ -106,9 +110,9 @@ const broadcastToRoom = (room: Room) => {
   const message = JSON.stringify({
     type: 'STATE_SYNC',
     payload: room.state,
-    timestamp: Date.now() 
+    timestamp: Date.now()
   });
-  
+
   room.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
@@ -132,7 +136,7 @@ const server = createServer((req, res) => {
       try {
         const config = JSON.parse(body || '{}');
         const roomId = Math.random().toString(36).substring(2, 8);
-        getOrCreateRoom(roomId, config); 
+        getOrCreateRoom(roomId, config);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ roomId }));
       } catch (e) {
@@ -162,24 +166,24 @@ wss.on('connection', (ws, req) => {
   const urlParams = new URLSearchParams(parse(req.url || '').query || '');
   const roomId = urlParams.get('room') || 'default';
   const room = getOrCreateRoom(roomId);
-  
+
   room.clients.add(ws);
-  
+
   // ✅ 修复：连接时也发送带时间戳的同步包
-  ws.send(JSON.stringify({ 
-    type: 'STATE_SYNC', 
+  ws.send(JSON.stringify({
+    type: 'STATE_SYNC',
     payload: room.state,
-    timestamp: Date.now() 
+    timestamp: Date.now()
   }));
 
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
       room.lastActivity = Date.now();
-      
+
       if (data.type === 'ACTION_SUBMIT' || data.type === 'TOGGLE_READY') {
-        const payload = data.type === 'TOGGLE_READY' 
-          ? { ...data.payload, type: 'TOGGLE_READY' } 
+        const payload = data.type === 'TOGGLE_READY'
+          ? { ...data.payload, type: 'TOGGLE_READY' }
           : data.payload;
 
         const error = validateMove(room.state, payload);
@@ -190,7 +194,7 @@ wss.on('connection', (ws, req) => {
 
         const now = Date.now();
         const newState = applyAction(room.state, payload, now);
-        
+
         const newAction = newState.history[newState.history.length - 1];
         if (newAction) saveActionAndUpdateState(roomId, newAction, newState);
         else saveRoomState(roomId, newState);
@@ -198,22 +202,22 @@ wss.on('connection', (ws, req) => {
         room.state = newState;
         broadcastToRoom(room);
       }
-      
+
       if (data.type === 'ACTION_UNDO') {
         if (room.state.history.length > 0) {
-           const newHistory = room.state.history.slice(0, -1);
-           const newState = replay(newHistory, Date.now());
-           saveRoomState(roomId, newState);
-           room.state = newState;
-           broadcastToRoom(room);
-        }
-      }
-      
-      if (data.type === 'ACTION_RESET') {
-          const newState = applyAction(room.state, { type: 'RESET_GAME', actorRole: 'REFEREE' }, Date.now());
+          const newHistory = room.state.history.slice(0, -1);
+          const newState = replay(newHistory, Date.now(), room.state);
           saveRoomState(roomId, newState);
           room.state = newState;
           broadcastToRoom(room);
+        }
+      }
+
+      if (data.type === 'ACTION_RESET') {
+        const newState = applyAction(room.state, { type: 'RESET_GAME', actorRole: 'REFEREE' }, Date.now());
+        saveRoomState(roomId, newState);
+        room.state = newState;
+        broadcastToRoom(room);
       }
 
     } catch (e) {
@@ -230,11 +234,11 @@ setInterval(() => {
   const now = Date.now();
   rooms.forEach((room) => {
     if (room.state.paused) return;
-    if (room.state.status !== 'RUNNING') return; 
-    
+    if (room.state.status !== 'RUNNING') return;
+
     // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限)
     if (room.state.stepEndsAt > 0 && now > room.state.stepEndsAt) {
-      console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`); 
+      console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`);
 
       let newState = room.state;
       if (room.state.phase === 'DRAFT') {

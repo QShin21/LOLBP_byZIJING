@@ -893,6 +893,8 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
 
 type FloatingChatPosition = { x: number; y: number };
 
+type FloatingChatSize = { w: number; h: number };
+
 const formatChatTime = (ts: number) => {
   try {
     return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -907,6 +909,7 @@ const FloatingChatWindow = ({
   open,
   minimized,
   position,
+  size,
   unread,
   messages,
   selfRole,
@@ -914,12 +917,14 @@ const FloatingChatWindow = ({
   onClose,
   onToggleMinimize,
   onPositionChange,
+  onSizeChange,
   onSend,
   onMarkRead,
 }: {
   open: boolean;
   minimized: boolean;
   position: FloatingChatPosition;
+  size: FloatingChatSize;
   unread: number;
   messages: ChatMessage[];
   selfRole: UserRole;
@@ -927,6 +932,7 @@ const FloatingChatWindow = ({
   onClose: () => void;
   onToggleMinimize: () => void;
   onPositionChange: (p: FloatingChatPosition) => void;
+  onSizeChange: (s: FloatingChatSize) => void;
   onSend: (text: string) => void;
   onMarkRead: () => void;
 }) => {
@@ -951,6 +957,23 @@ const FloatingChatWindow = ({
     if (open && !minimized) onMarkRead();
   }, [open, minimized, onMarkRead]);
 
+  // Observe resizing (CSS resize handle)
+  useEffect(() => {
+    if (!open || minimized) return;
+    const el = boxRef.current;
+    if (!el) return;
+
+    const ro = new ResizeObserver(() => {
+      const rect = el.getBoundingClientRect();
+      const w = Math.round(rect.width);
+      const h = Math.round(rect.height);
+      onSizeChange({ w, h });
+    });
+
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open, minimized, onSizeChange]);
+
   const startDrag = (e: React.PointerEvent) => {
     if (!open) return;
     // only left button / primary pointer
@@ -963,8 +986,8 @@ const FloatingChatWindow = ({
     const dy = e.clientY - (rect?.top ?? position.y);
 
     const onMove = (ev: PointerEvent) => {
-      const w = boxRef.current?.offsetWidth ?? 340;
-      const h = boxRef.current?.offsetHeight ?? 260;
+      const w = boxRef.current?.offsetWidth ?? size.w;
+      const h = boxRef.current?.offsetHeight ?? (minimized ? 44 : size.h);
 
       const maxX = window.innerWidth - w - 8;
       const maxY = window.innerHeight - h - 8;
@@ -1000,8 +1023,17 @@ const FloatingChatWindow = ({
     <div className="fixed inset-0 z-[60] pointer-events-none">
       <div
         ref={boxRef}
-        className="absolute pointer-events-auto w-[340px] max-w-[92vw] bg-slate-900/80 backdrop-blur-2xl border border-slate-700/60 rounded-2xl shadow-2xl overflow-hidden"
-        style={{ left: position.x, top: position.y }}
+        className="absolute pointer-events-auto max-w-[92vw] max-h-[92vh] bg-slate-900/80 backdrop-blur-2xl border border-slate-700/60 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+        style={{
+          left: position.x,
+          top: position.y,
+          width: size.w,
+          height: minimized ? 44 : size.h,
+          minWidth: 280,
+          minHeight: minimized ? 44 : 240,
+          resize: minimized ? 'none' : 'both',
+          boxSizing: 'border-box',
+        }}
       >
         {/* Header (drag handle) */}
         <div
@@ -1046,9 +1078,9 @@ const FloatingChatWindow = ({
         </div>
 
         {!minimized && (
-          <div className="flex flex-col">
+          <div className="flex flex-col flex-1 min-h-0">
             {/* Messages */}
-            <div ref={listRef} className="max-h-[300px] overflow-y-auto px-3 py-2 space-y-2">
+            <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2">
               {messages.length === 0 ? (
                 <div className="text-xs text-slate-500 py-6 text-center">暂无消息</div>
               ) : (
@@ -1143,6 +1175,7 @@ export default function App() {
   const [chatMinimized, setChatMinimized] = useState(false);
   const [chatUnread, setChatUnread] = useState(0);
   const [chatPos, setChatPos] = useState<FloatingChatPosition>({ x: 16, y: 120 });
+  const [chatSize, setChatSize] = useState<FloatingChatSize>({ w: 360, h: 480 });
   const chatUiStateRef = useRef<{ open: boolean; minimized: boolean }>({ open: false, minimized: false });
   const autoChatOpenedRef = useRef<string | null>(null);
 
@@ -1186,6 +1219,11 @@ export default function App() {
       y: Math.max(100, window.innerHeight - 520),
     };
 
+    const defaultSize: FloatingChatSize = {
+      w: clamp(360, 280, Math.floor(window.innerWidth * 0.92)),
+      h: clamp(480, 240, Math.floor(window.innerHeight * 0.92)),
+    };
+
     try {
       const uiRaw = localStorage.getItem(`lolbp_chat_ui_${roomId}`);
       if (uiRaw) {
@@ -1193,10 +1231,14 @@ export default function App() {
         if (ui?.pos && typeof ui.pos.x === 'number' && typeof ui.pos.y === 'number') setChatPos(ui.pos);
         else setChatPos(defaultPos);
 
+        if (ui?.size && typeof ui.size.w === 'number' && typeof ui.size.h === 'number') setChatSize(ui.size);
+        else setChatSize(defaultSize);
+
         if (typeof ui?.minimized === 'boolean') setChatMinimized(ui.minimized);
         if (typeof ui?.open === 'boolean') setChatOpen(ui.open);
       } else {
         setChatPos(defaultPos);
+        setChatSize(defaultSize);
         setChatMinimized(false);
         setChatOpen(false);
       }
@@ -1210,6 +1252,7 @@ export default function App() {
       }
     } catch {
       setChatPos(defaultPos);
+      setChatSize(defaultSize);
       setChatMinimized(false);
       setChatOpen(false);
       setChatMessages([]);
@@ -1232,9 +1275,9 @@ export default function App() {
   useEffect(() => {
     if (!roomId) return;
     try {
-      localStorage.setItem(`lolbp_chat_ui_${roomId}`, JSON.stringify({ pos: chatPos, minimized: chatMinimized, open: chatOpen }));
+      localStorage.setItem(`lolbp_chat_ui_${roomId}`, JSON.stringify({ pos: chatPos, size: chatSize, minimized: chatMinimized, open: chatOpen }));
     } catch {}
-  }, [roomId, chatPos, chatMinimized, chatOpen]);
+  }, [roomId, chatPos, chatSize, chatMinimized, chatOpen]);
 
   // Persist chat messages (client side cache; server is source of truth)
   useEffect(() => {
@@ -1647,6 +1690,7 @@ export default function App() {
           open={chatOpen}
           minimized={chatMinimized}
           position={chatPos}
+          size={chatSize}
           unread={chatUnread}
           messages={chatMessages}
           selfRole={userRole as UserRole}
@@ -1660,6 +1704,13 @@ export default function App() {
             })
           }
           onPositionChange={setChatPos}
+          onSizeChange={(s) => {
+            const next = {
+              w: clamp(s.w, 280, Math.floor(window.innerWidth * 0.92)),
+              h: clamp(s.h, 240, Math.floor(window.innerHeight * 0.92)),
+            };
+            setChatSize((prev) => (prev.w === next.w && prev.h === next.h ? prev : next));
+          }}
           onSend={handleChatSend}
           onMarkRead={() => setChatUnread(0)}
         />

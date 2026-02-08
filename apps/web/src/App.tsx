@@ -415,22 +415,22 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
                 <button
                   onClick={() => setConfig({ ...config, draftMode: 'STANDARD' })}
                   className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
-                    config.draftMode === '竞技征兆(STANDARD)'
+                    config.draftMode === 'STANDARD'
                       ? 'bg-blue-600/90 border-blue-600 text-white shadow-md shadow-blue-900/20'
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
                 >
-                  Standard
+                  竞技征兆（Standard）
                 </button>
                 <button
                   onClick={() => setConfig({ ...config, draftMode: 'FEARLESS' })}
                   className={`flex-1 py-2.5 rounded-xl border font-bold transition-all flex items-center justify-center gap-2 ${
-                    config.draftMode === '无畏征兆(FEARLESS)'
+                    config.draftMode === 'FEARLESS'
                       ? 'bg-red-600/90 border-red-600 text-white shadow-md shadow-red-900/20'
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
                 >
-                  <Skull size={16} /> Fearless
+                  <Skull size={16} /> 无畏征兆（Fearless）
                 </button>
               </div>
               <div className="text-[11px] text-slate-500 mt-2">

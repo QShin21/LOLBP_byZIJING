@@ -54,26 +54,34 @@ export interface GameResultSnapshot {
   redPicks: string[];
 }
 
+// ✅ 新增：聊天消息结构
+export interface ChatMessage {
+  id: string;
+  senderRole: string; // 'REFEREE' | 'TEAM_A' | 'TEAM_B' | 'SPECTATOR'
+  content: string;
+  timestamp: number;
+}
+
 export interface DraftState {
   lastActionSeq: number;
 
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
-  timeLimit: number; // <--- 每回合秒数 (0 代表无上限)
+  timeLimit: number;
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number;
   sides: { [key in TeamId]: Side | null };
   nextSideSelector: TeamId | 'REFEREE' | null;
 
-  // ✅ 是否开启“地图颜色(蓝/红)与BP顺序分离”
-  // 关闭：BP顺序固定按当前蓝色方先手（与旧逻辑一致）
-  // 开启：由 bpFirstTeam 决定哪一方获得“先手 BP 权”(即替代原本 BLUE 的先手位置)
   separateSideAndBpOrder: boolean;
   bpFirstTeam: TeamId | null;
 
   seriesHistory: GameResultSnapshot[];
+
+  // ✅ 新增：聊天记录
+  chatMessages: ChatMessage[];
 
   status: DraftStatus;
   phase: DraftPhase;
@@ -99,15 +107,11 @@ export interface DraftState {
 type HeroLike = { id: string };
 
 const CANDIDATE_MODULE_PATHS = [
-  // ✅ 方案A：优先读取复制到后端本地的文件 (位于 apps/server/src/data/heroes.ts)
   './data/heroes',
-
-  // ✅ 方案B：或者读取源码 TS 文件 (位于 apps/server/src/data/heroes.ts)
   '../src/data/heroes',
 ];
 
 function extractHeroIdsFromModule(mod: any): string[] {
-  // 兼容几种常见导出：HEROES / RAW_HEROES / default
   const candidates = [mod?.HEROES, mod?.RAW_HEROES, mod?.default].filter(Boolean);
   for (const c of candidates) {
     if (Array.isArray(c)) {
@@ -118,7 +122,6 @@ function extractHeroIdsFromModule(mod: any): string[] {
     }
   }
 
-  // 兼容：模块里直接导出 HERO_IDS
   if (Array.isArray(mod?.HERO_IDS) && mod.HERO_IDS.length) {
     return mod.HERO_IDS.filter((s: any) => typeof s === 'string' && s.length > 0);
   }
@@ -130,11 +133,10 @@ function loadHeroIdsOrThrow(): string[] {
   const errors: string[] = [];
   for (const p of CANDIDATE_MODULE_PATHS) {
     try {
-      // 直接使用全局 require (CommonJS)
       const mod = require(p);
       const ids = extractHeroIdsFromModule(mod);
       if (ids.length) return ids;
-      errors.push(`${p}: module loaded but no hero ids exported (HEROES/RAW_HEROES/HERO_IDS/default)`);
+      errors.push(`${p}: module loaded but no hero ids exported`);
     } catch (e: any) {
       errors.push(`${p}: ${e?.message ?? String(e)}`);
     }
@@ -151,10 +153,8 @@ function loadHeroIdsOrThrow(): string[] {
   );
 }
 
-// ✅ 后端随机、校验等全部使用同一份 HERO_IDS
 const HERO_IDS: string[] = loadHeroIdsOrThrow();
 
-// base 序列：默认假设 BLUE 是 BP 先手方
 const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
   { side: 'BLUE', type: 'BAN' },
   { side: 'RED', type: 'BAN' },
@@ -184,7 +184,7 @@ export const INITIAL_STATE: DraftState = {
   matchTitle: '',
   seriesMode: 'BO1',
   draftMode: 'STANDARD',
-  timeLimit: 30, // 默认 30s
+  timeLimit: 30,
   teamA: { name: 'Team A', wins: 0 },
   teamB: { name: 'Team B', wins: 0 },
   currentGameIdx: 1,
@@ -194,6 +194,9 @@ export const INITIAL_STATE: DraftState = {
   separateSideAndBpOrder: false,
   bpFirstTeam: null,
   seriesHistory: [],
+  
+  // ✅ 初始为空聊天记录
+  chatMessages: [],
 
   status: 'NOT_STARTED',
   phase: 'DRAFT',
@@ -214,7 +217,6 @@ export const getCurrentStep = (state: DraftState): DraftStep | null => {
   if (state.draftStepIndex >= DRAFT_SEQUENCE.length) return null;
   const base = DRAFT_SEQUENCE[state.draftStepIndex];
 
-  // ✅ BP 先手方(颜色)计算：默认 BLUE 先手；开启分离后由 bpFirstTeam 决定
   const bpFirstSide: Side = (() => {
     if (!state.separateSideAndBpOrder) return 'BLUE';
     if (!state.bpFirstTeam) return 'BLUE';
@@ -222,7 +224,6 @@ export const getCurrentStep = (state: DraftState): DraftStep | null => {
     return side || 'BLUE';
   })();
 
-  // base 序列默认假设 BLUE 是“BP先手方”。若先手方实际为 RED，则整体翻转。
   const resolvedSide: Side = bpFirstSide === 'RED' ? (base.side === 'BLUE' ? 'RED' : 'BLUE') : base.side;
 
   return { ...base, side: resolvedSide, index: state.draftStepIndex };
@@ -234,7 +235,6 @@ const getSideFromRole = (state: DraftState, role: string): Side | null => {
   return null;
 };
 
-// --- FEARLESS LOGIC ---
 const getFearlessBannedIds = (state: DraftState): Set<string> => {
   const set = new Set<string>();
   if (state.draftMode !== 'FEARLESS') return set;
@@ -246,7 +246,6 @@ const getFearlessBannedIds = (state: DraftState): Set<string> => {
   return set;
 };
 
-// --- VALIDATION LOGIC ---
 export const validateMove = (state: DraftState, payload: any): string | null => {
   const { actorRole, type, side, heroId } = payload;
 
@@ -298,7 +297,6 @@ export const validateMove = (state: DraftState, payload: any): string | null => 
     if (!currentStep) return 'Draft finished';
     if (currentStep.side !== actorSide) return `Not your turn`;
 
-    // Fearless Check
     if (heroId && state.draftMode === 'FEARLESS') {
       if (heroId !== SPECIAL_ID_NONE && heroId !== SPECIAL_ID_RANDOM) {
         const fearlessBans = getFearlessBannedIds(state);
@@ -330,7 +328,6 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
       const sideA = action.payload.sideForA as Side;
       const sideB = sideA === 'BLUE' ? 'RED' : 'BLUE';
       newState.sides = { TEAM_A: sideA, TEAM_B: sideB };
-      // 开启分离时，需要同时记录 BP 先手队伍 (TEAM_A / TEAM_B)
       if (newState.separateSideAndBpOrder) {
         const bp = action.payload.bpFirstTeam as TeamId | undefined;
         newState.bpFirstTeam = bp === 'TEAM_A' || bp === 'TEAM_B' ? bp : null;
@@ -412,6 +409,8 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
         teamA: { ...state.teamA, wins: 0 },
         teamB: { ...state.teamB, wins: 0 },
         lastActionSeq: action.seq,
+        // ✅ 保持聊天记录
+        chatMessages: state.chatMessages, 
       };
 
     case 'PAUSE_GAME':
@@ -520,7 +519,6 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
 
   const newState = reduceState(state, action);
 
-  // 计算持续时间：如果 timeLimit 是 0，则 duration 为 0
   const duration = (state.timeLimit || 0) * 1000;
 
   if (action.type === 'PAUSE_GAME') {
@@ -528,22 +526,18 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
     else newState.pausedAt = state.pausedAt;
   } else if (action.type === 'RESUME_GAME') {
     if (state.pausedAt) {
-      // 恢复时，把暂停的时间补回来
       newState.stepEndsAt = state.stepEndsAt + (now - state.pausedAt);
       newState.pausedAt = undefined;
     }
   } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
-    // 只有在这些动作发生时，才重置倒计时
     const shouldResetTimer =
       action.type === 'START_GAME' ||
-      (state.phase === 'DRAFT' && newState.phase === 'DRAFT') || // Ban/Pick 动作
-      (state.phase === 'DRAFT' && newState.phase === 'SWAP'); // 进入 Swap 阶段
+      (state.phase === 'DRAFT' && newState.phase === 'DRAFT') || 
+      (state.phase === 'DRAFT' && newState.phase === 'SWAP');
 
     if (shouldResetTimer) {
-      // 如果 duration > 0，则设置截止时间；否则设为 0 (无上限)
       newState.stepEndsAt = duration > 0 ? now + duration : 0;
     } else {
-      // Swap 内部动作不重置时间
       newState.stepEndsAt = state.stepEndsAt;
     }
   } else if (newState.phase === 'FINISHED') {
@@ -555,7 +549,6 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
 };
 
 export const replay = (history: DraftAction[], now: number, seedConfig?: DraftState | null): DraftState => {
-  // ✅ Undo/重放时保留“无法从 history 推导”的配置项
   const base: DraftState = {
     ...INITIAL_STATE,
     matchTitle: seedConfig?.matchTitle ?? INITIAL_STATE.matchTitle,
@@ -566,6 +559,8 @@ export const replay = (history: DraftAction[], now: number, seedConfig?: DraftSt
     bpFirstTeam: null,
     teamA: { name: seedConfig?.teamA?.name ?? INITIAL_STATE.teamA.name, wins: 0 },
     teamB: { name: seedConfig?.teamB?.name ?? INITIAL_STATE.teamB.name, wins: 0 },
+    // ✅ Undo/Replay 时保留聊天记录
+    chatMessages: seedConfig?.chatMessages ?? INITIAL_STATE.chatMessages,
   };
 
   let state = { ...base };

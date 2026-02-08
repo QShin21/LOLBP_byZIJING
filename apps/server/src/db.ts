@@ -6,10 +6,19 @@ import { DraftState, DraftAction } from './game';
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const ROOMS_DIR = path.join(DATA_DIR, 'rooms');
 const ACTIONS_DIR = path.join(DATA_DIR, 'actions');
+const CHATS_DIR = path.join(DATA_DIR, 'chats');
 
 // 确保目录存在
 if (!fs.existsSync(ROOMS_DIR)) fs.mkdirSync(ROOMS_DIR, { recursive: true });
 if (!fs.existsSync(ACTIONS_DIR)) fs.mkdirSync(ACTIONS_DIR, { recursive: true });
+if (!fs.existsSync(CHATS_DIR)) fs.mkdirSync(CHATS_DIR, { recursive: true });
+
+export interface ChatMessage {
+  id: string;
+  ts: number; // ms
+  role: string; // REFEREE / TEAM_A / TEAM_B / ...
+  text: string;
+}
 
 // 从 JSON 文件恢复房间状态
 export const getRoomState = (roomId: string): DraftState | null => {
@@ -36,7 +45,7 @@ export const saveActionAndUpdateState = (roomId: string, action: DraftAction, ne
   // 1. 追加/保存 Action
   const actionFile = path.join(ACTIONS_DIR, `${roomId}.json`);
   let actions: DraftAction[] = [];
-  
+
   if (fs.existsSync(actionFile)) {
     try {
       actions = JSON.parse(fs.readFileSync(actionFile, 'utf-8'));
@@ -44,7 +53,7 @@ export const saveActionAndUpdateState = (roomId: string, action: DraftAction, ne
       console.error('Error reading actions file', e);
     }
   }
-  
+
   actions.push(action);
   fs.writeFileSync(actionFile, JSON.stringify(actions, null, 2));
 
@@ -58,8 +67,37 @@ export const getRoomActions = (roomId: string, afterSeq: number = 0): DraftActio
   if (!fs.existsSync(actionFile)) return [];
   try {
     const actions: DraftAction[] = JSON.parse(fs.readFileSync(actionFile, 'utf-8'));
-    return actions.filter(a => a.seq > afterSeq);
+    return actions.filter((a) => a.seq > afterSeq);
   } catch (e) {
     return [];
   }
+};
+
+// =====================
+// Chat persistence
+// =====================
+
+export const getRoomChat = (roomId: string): ChatMessage[] => {
+  const chatFile = path.join(CHATS_DIR, `${roomId}.json`);
+  if (!fs.existsSync(chatFile)) return [];
+  try {
+    const raw = fs.readFileSync(chatFile, 'utf-8');
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? (arr as ChatMessage[]).filter((m) => m && typeof m.id === 'string') : [];
+  } catch (e) {
+    return [];
+  }
+};
+
+export const saveRoomChat = (roomId: string, messages: ChatMessage[]) => {
+  const chatFile = path.join(CHATS_DIR, `${roomId}.json`);
+  fs.writeFileSync(chatFile, JSON.stringify(messages, null, 2));
+};
+
+export const appendRoomChatMessage = (roomId: string, message: ChatMessage, maxMessages: number = 200) => {
+  const messages = getRoomChat(roomId);
+  messages.push(message);
+  const trimmed = messages.slice(-maxMessages);
+  saveRoomChat(roomId, trimmed);
+  return trimmed;
 };

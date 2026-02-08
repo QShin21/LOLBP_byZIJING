@@ -18,6 +18,9 @@ import {
   Wifi,
   WifiOff,
   Search,
+  MessageSquare,
+  Minus,
+  X,
 } from 'lucide-react';
 
 // ✅ 从 data/heroes.ts 导入（该文件由脚本生成，包含 nameCn / titleCn）
@@ -70,6 +73,13 @@ interface DraftAction {
   heroId?: string;
   swapData?: { fromIndex: number; toIndex: number };
   actorRole?: string;
+}
+
+interface ChatMessage {
+  id: string;
+  ts: number; // ms
+  role: UserRole;
+  text: string;
 }
 
 interface GameResultSnapshot {
@@ -876,6 +886,237 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
   );
 };
 
+
+// ==========================================
+// FLOATING CHAT (Draggable / Minimizable)
+// ==========================================
+
+type FloatingChatPosition = { x: number; y: number };
+
+const formatChatTime = (ts: number) => {
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+};
+
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+
+const FloatingChatWindow = ({
+  open,
+  minimized,
+  position,
+  unread,
+  messages,
+  selfRole,
+  canSend,
+  onClose,
+  onToggleMinimize,
+  onPositionChange,
+  onSend,
+  onMarkRead,
+}: {
+  open: boolean;
+  minimized: boolean;
+  position: FloatingChatPosition;
+  unread: number;
+  messages: ChatMessage[];
+  selfRole: UserRole;
+  canSend: boolean;
+  onClose: () => void;
+  onToggleMinimize: () => void;
+  onPositionChange: (p: FloatingChatPosition) => void;
+  onSend: (text: string) => void;
+  onMarkRead: () => void;
+}) => {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [input, setInput] = useState('');
+
+  // Scroll to bottom when new messages arrive (only if expanded)
+  useEffect(() => {
+    if (!open || minimized) return;
+    const el = listRef.current;
+    if (!el) return;
+    // next tick
+    const t = window.setTimeout(() => {
+      el.scrollTop = el.scrollHeight;
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [messages.length, open, minimized]);
+
+  // Mark read when expanded
+  useEffect(() => {
+    if (open && !minimized) onMarkRead();
+  }, [open, minimized, onMarkRead]);
+
+  const startDrag = (e: React.PointerEvent) => {
+    if (!open) return;
+    // only left button / primary pointer
+    // @ts-ignore
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
+
+    const rect = boxRef.current?.getBoundingClientRect();
+    const dx = e.clientX - (rect?.left ?? position.x);
+    const dy = e.clientY - (rect?.top ?? position.y);
+
+    const onMove = (ev: PointerEvent) => {
+      const w = boxRef.current?.offsetWidth ?? 340;
+      const h = boxRef.current?.offsetHeight ?? 260;
+
+      const maxX = window.innerWidth - w - 8;
+      const maxY = window.innerHeight - h - 8;
+
+      const next = {
+        x: clamp(ev.clientX - dx, 8, Math.max(8, maxX)),
+        y: clamp(ev.clientY - dy, 8, Math.max(8, maxY)),
+      };
+      onPositionChange(next);
+    };
+
+    const onUp = () => {
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const sendNow = () => {
+    const text = input.trim();
+    if (!text) return;
+    onSend(text);
+    setInput('');
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[60] pointer-events-none">
+      <div
+        ref={boxRef}
+        className="absolute pointer-events-auto w-[340px] max-w-[92vw] bg-slate-900/80 backdrop-blur-2xl border border-slate-700/60 rounded-2xl shadow-2xl overflow-hidden"
+        style={{ left: position.x, top: position.y }}
+      >
+        {/* Header (drag handle) */}
+        <div
+          className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-950/40 border-b border-slate-700/60 cursor-move select-none"
+          onPointerDown={startDrag}
+          style={{ touchAction: 'none' }}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <MessageSquare size={14} className="text-yellow-400 shrink-0" />
+            <div className="font-black text-xs text-slate-200 truncate">聊天交流</div>
+            {unread > 0 && (
+              <span className="ml-1 text-[10px] font-black px-1.5 py-0.5 rounded-full bg-red-600/90 text-white border border-red-400/30">
+                {unread > 99 ? '99+' : unread}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleMinimize();
+              }}
+              className="p-1.5 rounded-lg hover:bg-slate-800/70 text-slate-200"
+              title={minimized ? '展开' : '最小化'}
+            >
+              <Minus size={14} />
+            </button>
+            <button
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose();
+              }}
+              className="p-1.5 rounded-lg hover:bg-slate-800/70 text-slate-200"
+              title="关闭"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+
+        {!minimized && (
+          <div className="flex flex-col">
+            {/* Messages */}
+            <div ref={listRef} className="max-h-[300px] overflow-y-auto px-3 py-2 space-y-2">
+              {messages.length === 0 ? (
+                <div className="text-xs text-slate-500 py-6 text-center">暂无消息</div>
+              ) : (
+                messages.map((m) => {
+                  const isSelf = m.role === selfRole;
+                  const roleLabel =
+                    m.role === 'TEAM_A' ? '队伍A' : m.role === 'TEAM_B' ? '队伍B' : m.role === 'REFEREE' ? '裁判' : m.role;
+
+                  return (
+                    <div key={m.id} className={`flex ${isSelf ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[78%]`}>
+                        <div className={`text-[10px] mb-0.5 ${isSelf ? 'text-right text-slate-400' : 'text-slate-500'}`}>
+                          <span className="font-black">{roleLabel}</span>
+                          <span className="mx-1 text-slate-700">•</span>
+                          <span>{formatChatTime(m.ts)}</span>
+                        </div>
+                        <div
+                          className={[
+                            'text-sm whitespace-pre-wrap break-words px-3 py-2 rounded-2xl border',
+                            isSelf
+                              ? 'bg-yellow-500/15 border-yellow-500/30 text-slate-100'
+                              : 'bg-slate-800/70 border-slate-700/60 text-slate-100',
+                          ].join(' ')}
+                        >
+                          {m.text}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Input */}
+            <div className="p-2 border-t border-slate-700/60 bg-slate-950/20">
+              {canSend ? (
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    rows={1}
+                    placeholder="输入消息，Enter 发送 / Shift+Enter 换行"
+                    className="flex-1 resize-none bg-slate-900/60 border border-slate-700/60 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-yellow-500/30"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        sendNow();
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={sendNow}
+                    className="px-3 py-2 rounded-xl bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-500/30 text-yellow-200 font-black text-xs"
+                  >
+                    发送
+                  </button>
+                </div>
+              ) : (
+                <div className="text-xs text-slate-500 text-center py-2">仅裁判/队伍可发送消息</div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ==========================================
 // MAIN APP
 // ==========================================
@@ -894,6 +1135,17 @@ export default function App() {
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
 
+
+  // CHAT（裁判 / 队伍A / 队伍B 可见）
+  const showChatForUser = userRole === 'REFEREE' || userRole === 'TEAM_A' || userRole === 'TEAM_B';
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMinimized, setChatMinimized] = useState(false);
+  const [chatUnread, setChatUnread] = useState(0);
+  const [chatPos, setChatPos] = useState<FloatingChatPosition>({ x: 16, y: 120 });
+  const chatUiStateRef = useRef<{ open: boolean; minimized: boolean }>({ open: false, minimized: false });
+  const autoChatOpenedRef = useRef<string | null>(null);
+
   // SIDE SELECTION（开启“地图与BP顺序分离”时需要同时选择 BP 首选队伍）
   const [pendingSideForA, setPendingSideForA] = useState<Side | null>(null);
   const [pendingBpFirstTeam, setPendingBpFirstTeam] = useState<TeamId | null>(null);
@@ -909,6 +1161,88 @@ export default function App() {
       return () => clearTimeout(t);
     }
   }, [toast]);
+
+
+  // keep ref updated (used for unread in WS handler)
+  useEffect(() => {
+    chatUiStateRef.current = { open: chatOpen, minimized: chatMinimized };
+  }, [chatOpen, chatMinimized]);
+
+  // Load / reset chat cache when room changes
+  useEffect(() => {
+    if (!roomId) {
+      setChatOpen(false);
+      setChatMinimized(false);
+      setChatMessages([]);
+      setChatUnread(0);
+      autoChatOpenedRef.current = null;
+      return;
+    }
+
+    setChatUnread(0);
+
+    const defaultPos: FloatingChatPosition = {
+      x: Math.max(16, window.innerWidth - 380),
+      y: Math.max(100, window.innerHeight - 520),
+    };
+
+    try {
+      const uiRaw = localStorage.getItem(`lolbp_chat_ui_${roomId}`);
+      if (uiRaw) {
+        const ui = JSON.parse(uiRaw);
+        if (ui?.pos && typeof ui.pos.x === 'number' && typeof ui.pos.y === 'number') setChatPos(ui.pos);
+        else setChatPos(defaultPos);
+
+        if (typeof ui?.minimized === 'boolean') setChatMinimized(ui.minimized);
+        if (typeof ui?.open === 'boolean') setChatOpen(ui.open);
+      } else {
+        setChatPos(defaultPos);
+        setChatMinimized(false);
+        setChatOpen(false);
+      }
+
+      const msgRaw = localStorage.getItem(`lolbp_chat_msgs_${roomId}`);
+      if (msgRaw) {
+        const arr = JSON.parse(msgRaw);
+        if (Array.isArray(arr)) setChatMessages(arr);
+      } else {
+        setChatMessages([]);
+      }
+    } catch {
+      setChatPos(defaultPos);
+      setChatMinimized(false);
+      setChatOpen(false);
+      setChatMessages([]);
+    }
+  }, [roomId]);
+
+  // Auto open once after 选择角色进入房间（每个房间仅自动打开一次）
+  useEffect(() => {
+    if (!roomId) return;
+    if (!showChatForUser) return;
+    if (autoChatOpenedRef.current === roomId) return;
+
+    autoChatOpenedRef.current = roomId;
+    setChatOpen(true);
+    setChatMinimized(false);
+    setChatUnread(0);
+  }, [roomId, showChatForUser]);
+
+  // Persist chat UI
+  useEffect(() => {
+    if (!roomId) return;
+    try {
+      localStorage.setItem(`lolbp_chat_ui_${roomId}`, JSON.stringify({ pos: chatPos, minimized: chatMinimized, open: chatOpen }));
+    } catch {}
+  }, [roomId, chatPos, chatMinimized, chatOpen]);
+
+  // Persist chat messages (client side cache; server is source of truth)
+  useEffect(() => {
+    if (!roomId) return;
+    try {
+      localStorage.setItem(`lolbp_chat_msgs_${roomId}`, JSON.stringify(chatMessages.slice(-300)));
+    } catch {}
+  }, [roomId, chatMessages]);
 
 
   // 进入 SIDE SELECTION / 切换局数时，重置本地待选项
@@ -1029,6 +1363,35 @@ export default function App() {
             lastSeenSeqRef.current = ns.lastActionSeq;
 
             setState(ns);
+
+          } else if (msg.type === 'CHAT_SYNC') {
+            const incoming = Array.isArray(msg.payload?.messages) ? (msg.payload.messages as ChatMessage[]) : [];
+            if (incoming.length) {
+              setChatMessages((prev) => {
+                const map = new Map<string, ChatMessage>();
+                [...prev, ...incoming].forEach((m) => {
+                  if (m && typeof m.id === 'string') map.set(m.id, m);
+                });
+                return Array.from(map.values())
+                  .sort((a, b) => a.ts - b.ts)
+                  .slice(-300);
+              });
+            }
+          } else if (msg.type === 'CHAT_MESSAGE') {
+            const cm = msg.payload as ChatMessage;
+            if (cm && typeof cm.id === 'string' && typeof cm.text === 'string') {
+              setChatMessages((prev) => {
+                if (prev.some((p) => p.id === cm.id)) return prev;
+                const next = [...prev, cm].sort((a, b) => a.ts - b.ts);
+                return next.slice(-300);
+              });
+
+              const ui = chatUiStateRef.current;
+              if (!ui.open || ui.minimized) setChatUnread((u) => u + 1);
+            }
+
+          } else if (msg.type === 'CHAT_REJECTED') {
+            setToast({ msg: msg.payload?.reason || '聊天消息发送失败', type: 'error' });
           } else if (msg.type === 'ACTION_REJECTED') {
             setToast({ msg: msg.payload.reason, type: 'error' });
           }
@@ -1056,6 +1419,23 @@ export default function App() {
       return;
     }
     setToast({ msg: '连接已断开，正在重连', type: 'error' });
+  };
+
+  const openChat = () => {
+    setChatOpen(true);
+    setChatMinimized(false);
+    setChatUnread(0);
+  };
+
+  const handleChatSend = (text: string) => {
+    if (!showChatForUser) return;
+    const t = (text || '').trim();
+    if (!t) return;
+    if (t.length > 300) {
+      setToast({ msg: '消息过长（最多 300 字）', type: 'error' });
+      return;
+    }
+    send('CHAT_SEND', { text: t });
   };
 
 
@@ -1262,6 +1642,30 @@ export default function App() {
       )}
       {!userRole && <RoleSelectionModal state={state} onSelect={setUserRole} />}
 
+      {showChatForUser && (
+        <FloatingChatWindow
+          open={chatOpen}
+          minimized={chatMinimized}
+          position={chatPos}
+          unread={chatUnread}
+          messages={chatMessages}
+          selfRole={userRole as UserRole}
+          canSend={showChatForUser}
+          onClose={() => setChatOpen(false)}
+          onToggleMinimize={() =>
+            setChatMinimized((m) => {
+              const next = !m;
+              if (!next) setChatUnread(0);
+              return next;
+            })
+          }
+          onPositionChange={setChatPos}
+          onSend={handleChatSend}
+          onMarkRead={() => setChatUnread(0)}
+        />
+      )}
+
+
       {/* Header */}
       <header className="h-20 bg-slate-900/70 backdrop-blur-2xl border-b border-slate-800/70 flex items-center justify-between px-6 md:px-8 shadow-lg z-10 relative">
         <div className="flex items-center gap-4 min-w-0">
@@ -1330,6 +1734,21 @@ export default function App() {
 
         {/* Right controls */}
         <div className="flex items-center gap-3">
+          {showChatForUser && (
+            <button
+              onClick={openChat}
+              className="flex items-center gap-1 text-xs bg-slate-800/60 hover:bg-slate-700/70 border border-slate-700/60 text-slate-200 px-3 py-1.5 rounded-full font-black transition-all"
+              title="聊天"
+            >
+              <MessageSquare size={14} />
+              <span className="hidden md:inline">聊天</span>
+              {chatUnread > 0 && (
+                <span className="ml-1 text-[10px] font-black px-1.5 py-0.5 rounded-full bg-red-600/90 text-white border border-red-400/30">
+                  {chatUnread > 99 ? '99+' : chatUnread}
+                </span>
+              )}
+            </button>
+          )}
           <div
             className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${
               isConnected ? 'bg-green-950/20 border-green-800/50 text-green-300' : 'bg-slate-900/40 border-slate-700/60 text-slate-400'

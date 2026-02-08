@@ -9,7 +9,7 @@ import {
   replay,
   SPECIAL_ID_RANDOM
 } from './game';
-import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions } from './db';
+import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions, getRoomChat, appendRoomChatMessage, ChatMessage } from './db';
 
 const PORT = 8080;
 
@@ -18,6 +18,7 @@ interface Room {
   state: DraftState;
   clients: Set<WebSocket>;
   lastActivity: number;
+  chat: ChatMessage[];
 }
 
 const rooms = new Map<string, Room>();
@@ -69,7 +70,8 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: safeState,
         clients: new Set(),
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
+        chat: getRoomChat(roomId)
       };
       saveRoomState(roomId, safeState);
     } else {
@@ -96,7 +98,8 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: initialState,
         clients: new Set(),
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
+        chat: []
       };
       saveRoomState(roomId, initialState);
     }
@@ -176,10 +179,61 @@ wss.on('connection', (ws, req) => {
     timestamp: Date.now()
   }));
 
+  // Chat history sync
+  ws.send(JSON.stringify({
+    type: 'CHAT_SYNC',
+    payload: { messages: room.chat },
+    timestamp: Date.now()
+  }));
+
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
       room.lastActivity = Date.now();
+
+      // keepalive
+      if (data.type === 'PING') {
+        try {
+          ws.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() }));
+        } catch {}
+        return;
+      }
+
+      // Chat relay (裁判 / TEAM_A / TEAM_B)
+      if (data.type === 'CHAT_SEND') {
+        const text = (data.payload?.text || '').toString().trim();
+        const role = (data.payload?.actorRole || '').toString();
+
+        const allowed = role === 'REFEREE' || role === 'TEAM_A' || role === 'TEAM_B';
+        if (!allowed) return;
+        if (!text) return;
+        if (text.length > 300) {
+          ws.send(JSON.stringify({ type: 'CHAT_REJECTED', payload: { reason: 'Message too long (max 300 chars)' } }));
+          return;
+        }
+
+        const chatMsg: ChatMessage = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          ts: Date.now(),
+          role,
+          text
+        };
+
+        room.chat.push(chatMsg);
+        if (room.chat.length > 200) room.chat = room.chat.slice(-200);
+
+        // persist
+        try {
+          appendRoomChatMessage(roomId, chatMsg, 200);
+        } catch {}
+
+        const out = JSON.stringify({ type: 'CHAT_MESSAGE', payload: chatMsg, timestamp: Date.now() });
+        room.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) client.send(out);
+        });
+
+        return;
+      }
 
       if (data.type === 'ACTION_SUBMIT' || data.type === 'TOGGLE_READY') {
         const payload = data.type === 'TOGGLE_READY'

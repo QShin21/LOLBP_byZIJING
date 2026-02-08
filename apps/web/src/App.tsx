@@ -331,13 +331,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
       <div className="absolute top-0 left-0 w-full h-full opacity-10 bg-[url('https://lol.qq.com/act/a20220120lpl/img/bg.jpg')] bg-cover bg-center" />
 
       <div className="max-w-xl w-full bg-slate-900/75 backdrop-blur-2xl border border-slate-700/70 rounded-3xl p-8 shadow-2xl z-10">
-        <div className="text-center mb-8">
-          <div className="mx-auto w-16 h-16 rounded-2xl bg-gradient-to-br from-yellow-500/25 to-slate-800/30 border border-slate-700/60 flex items-center justify-center shadow-lg">
-            <Sword size={32} className="text-yellow-400" />
-          </div>
-          <h1 className="mt-5 text-4xl font-black text-white italic tracking-tight">BP SIMULATOR</h1>
-          <p className="text-slate-400 mt-1">Tournament Edition</p>
-        </div>
+        
 
         <div className="flex gap-2 mb-6 bg-slate-800/70 p-1 rounded-xl border border-slate-700/60">
           <button
@@ -365,7 +359,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
         {activeTab === 'CREATE' ? (
           <div className="space-y-4">
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Match Title (Optional)</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">比赛名称 (Match Title)</label>
               <input
                 type="text"
                 className="w-full bg-slate-950/80 border border-slate-700/70 rounded-xl p-3 text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-yellow-500/30 focus:border-yellow-500/30"
@@ -377,7 +371,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Team A Name</label>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">队伍一(Team A Name)</label>
                 <input
                   type="text"
                   className="w-full bg-slate-950/80 border border-slate-700/70 rounded-xl p-3 text-white focus:outline-none focus:ring-2 focus:ring-yellow-500/20 focus:border-yellow-500/30"
@@ -386,7 +380,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Team B Name</label>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">队伍二(Team B Name)</label>
                 <input
                   type="text"
                   className="w-full bg-slate-950/80 border border-slate-700/70 rounded-xl p-3 text-white focus:outline-none focus:ring-2 focus:ring-yellow-500/20 focus:border-yellow-500/30"
@@ -397,7 +391,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Series Format</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">场次选择(Series Format)</label>
               <div className="flex gap-2">
                 {['BO1', 'BO2', 'BO3', 'BO5'].map((m) => (
                   <button
@@ -416,12 +410,12 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Draft Mode</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">BP模式(Draft Mode)</label>
               <div className="flex gap-2">
                 <button
                   onClick={() => setConfig({ ...config, draftMode: 'STANDARD' })}
                   className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
-                    config.draftMode === 'STANDARD'
+                    config.draftMode === '竞技征兆(STANDARD)'
                       ? 'bg-blue-600/90 border-blue-600 text-white shadow-md shadow-blue-900/20'
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
@@ -431,7 +425,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
                 <button
                   onClick={() => setConfig({ ...config, draftMode: 'FEARLESS' })}
                   className={`flex-1 py-2.5 rounded-xl border font-bold transition-all flex items-center justify-center gap-2 ${
-                    config.draftMode === 'FEARLESS'
+                    config.draftMode === '无畏征兆(FEARLESS)'
                       ? 'bg-red-600/90 border-red-600 text-white shadow-md shadow-red-900/20'
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
@@ -447,7 +441,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Time Per Turn</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">时间选项(Time Per Turn)</label>
               <div className="flex gap-2">
                 {[30, 60, 90, 0].map((t) => (
                   <button
@@ -466,7 +460,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Map Side & BP Order</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">BP与地图是否分离（Map Side & BP Order）</label>
               <div className="flex gap-2">
                 <button
                   onClick={() => setConfig({ ...config, separateSideAndBpOrder: false })}
@@ -476,7 +470,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
                 >
-                  关闭
+                  关闭(close)
                 </button>
                 <button
                   onClick={() => setConfig({ ...config, separateSideAndBpOrder: true })}
@@ -486,11 +480,11 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
                 >
-                  开启
+                  开启(open)
                 </button>
               </div>
               <div className="text-[11px] text-slate-500 mt-2">
-                开启后：蓝红方(地图)与 BP 先手可分离，在 SIDE SELECTION 里额外选择“BP首选 TEAM A / TEAM B”。
+                开启后：蓝红方(地图)与 BP 先手可分离， 额外选择“BP首选 TEAM A / TEAM B”。
               </div>
             </div>
 
@@ -498,7 +492,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
               onClick={() => onCreate(config)}
               className="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-white py-3.5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-yellow-900/15 transition-transform hover:scale-[1.01] active:scale-[0.99]"
             >
-              CREATE LOBBY
+              创建房间(CREATE ROOM)
             </button>
 
             <div className="pt-2 text-[11px] text-slate-500 text-center">
@@ -1410,7 +1404,7 @@ export default function App() {
             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm">
               <div className="bg-slate-900/70 border border-slate-700/60 rounded-3xl p-8 shadow-2xl max-w-3xl w-full mx-6">
                 <div className="text-center">
-                  <h2 className="text-4xl font-black text-white italic mb-4">SIDE SELECTION</h2>
+                  <h2 className="text-4xl font-black text-white italic mb-4">选图选边SIDE SELECTION</h2>
                   <div className="text-slate-400 mb-8 text-lg">
                     {state.nextSideSelector === 'REFEREE' ? 'Referee is setting initial sides' : `${getTeamData(state.nextSideSelector)?.name} is choosing side`}
                   </div>

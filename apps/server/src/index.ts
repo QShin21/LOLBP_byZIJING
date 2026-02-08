@@ -7,10 +7,9 @@ import {
   applyAction,
   validateMove,
   replay,
-  SPECIAL_ID_RANDOM,
-  ChatMessage
+  SPECIAL_ID_RANDOM
 } from './game';
-import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions } from './db';
+import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions, getRoomChat, appendRoomChatMessage, ChatMessage } from './db';
 
 const PORT = 8080;
 
@@ -19,6 +18,7 @@ interface Room {
   state: DraftState;
   clients: Set<WebSocket>;
   lastActivity: number;
+  chat: ChatMessage[];
 }
 
 const rooms = new Map<string, Room>();
@@ -50,9 +50,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         redBans: persistedState.redBans || [],
         bluePicks: persistedState.bluePicks || [],
         redPicks: persistedState.redPicks || [],
-        history: persistedState.history || [],
-        // ✅ 确保恢复聊天
-        chatMessages: persistedState.chatMessages || []
+        history: persistedState.history || []
       };
 
       if (safeState.status === 'NOT_STARTED') {
@@ -72,7 +70,8 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: safeState,
         clients: new Set(),
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
+        chat: getRoomChat(roomId)
       };
       saveRoomState(roomId, safeState);
     } else {
@@ -94,13 +93,13 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
         teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
         sides: { TEAM_A: null, TEAM_B: null },
-        chatMessages: [],
       };
       room = {
         id: roomId,
         state: initialState,
         clients: new Set(),
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
+        chat: []
       };
       saveRoomState(roomId, initialState);
     }
@@ -110,6 +109,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
 };
 
 const broadcastToRoom = (room: Room) => {
+  // ✅ 修复：附带服务器当前时间戳，用于客户端校准
   const message = JSON.stringify({
     type: 'STATE_SYNC',
     payload: room.state,
@@ -172,9 +172,17 @@ wss.on('connection', (ws, req) => {
 
   room.clients.add(ws);
 
+  // ✅ 修复：连接时也发送带时间戳的同步包
   ws.send(JSON.stringify({
     type: 'STATE_SYNC',
     payload: room.state,
+    timestamp: Date.now()
+  }));
+
+  // Chat history sync
+  ws.send(JSON.stringify({
+    type: 'CHAT_SYNC',
+    payload: { messages: room.chat },
     timestamp: Date.now()
   }));
 
@@ -183,25 +191,48 @@ wss.on('connection', (ws, req) => {
       const data = JSON.parse(message.toString());
       room.lastActivity = Date.now();
 
-      // ✅ 新增：聊天处理
+      // keepalive
+      if (data.type === 'PING') {
+        try {
+          ws.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() }));
+        } catch {}
+        return;
+      }
+
+      // Chat relay (裁判 / TEAM_A / TEAM_B)
       if (data.type === 'CHAT_SEND') {
-        const { actorRole, text } = data.payload || {};
-        if (actorRole && text && typeof text === 'string' && text.trim().length > 0) {
-          const msg: ChatMessage = {
-            id: Math.random().toString(36).substring(2),
-            senderRole: actorRole,
-            content: text.trim(),
-            timestamp: Date.now()
-          };
-          room.state.chatMessages.push(msg);
-          // 简单限制一下长度，防止无限增长
-          if (room.state.chatMessages.length > 200) {
-            room.state.chatMessages = room.state.chatMessages.slice(-200);
-          }
-          saveRoomState(roomId, room.state);
-          broadcastToRoom(room);
+        const text = (data.payload?.text || '').toString().trim();
+        const role = (data.payload?.actorRole || '').toString();
+
+        const allowed = role === 'REFEREE' || role === 'TEAM_A' || role === 'TEAM_B';
+        if (!allowed) return;
+        if (!text) return;
+        if (text.length > 300) {
+          ws.send(JSON.stringify({ type: 'CHAT_REJECTED', payload: { reason: 'Message too long (max 300 chars)' } }));
+          return;
         }
-        return; 
+
+        const chatMsg: ChatMessage = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          ts: Date.now(),
+          role,
+          text
+        };
+
+        room.chat.push(chatMsg);
+        if (room.chat.length > 200) room.chat = room.chat.slice(-200);
+
+        // persist
+        try {
+          appendRoomChatMessage(roomId, chatMsg, 200);
+        } catch {}
+
+        const out = JSON.stringify({ type: 'CHAT_MESSAGE', payload: chatMsg, timestamp: Date.now() });
+        room.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) client.send(out);
+        });
+
+        return;
       }
 
       if (data.type === 'ACTION_SUBMIT' || data.type === 'TOGGLE_READY') {
@@ -229,7 +260,6 @@ wss.on('connection', (ws, req) => {
       if (data.type === 'ACTION_UNDO') {
         if (room.state.history.length > 0) {
           const newHistory = room.state.history.slice(0, -1);
-          // undo 时需要保留当前的聊天记录
           const newState = replay(newHistory, Date.now(), room.state);
           saveRoomState(roomId, newState);
           room.state = newState;
@@ -260,6 +290,7 @@ setInterval(() => {
     if (room.state.paused) return;
     if (room.state.status !== 'RUNNING') return;
 
+    // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限)
     if (room.state.stepEndsAt > 0 && now > room.state.stepEndsAt) {
       console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`);
 

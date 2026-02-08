@@ -94,6 +94,10 @@ interface DraftState {
   currentGameIdx: number;
   sides: { [key in TeamId]: Side | null };
   nextSideSelector: TeamId | 'REFEREE' | null;
+  // ✅ 是否开启“地图(蓝红)与BP顺序分离”
+  separateSideAndBpOrder: boolean;
+  // ✅ 开启时：BP 首选队伍（TEAM_A / TEAM_B）
+  bpFirstTeam: TeamId | null;
   seriesHistory: GameResultSnapshot[];
 
   status: DraftStatus;
@@ -162,7 +166,21 @@ const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
 
 const getCurrentStep = (state: DraftState): DraftStep | null => {
   if (state.draftStepIndex >= DRAFT_SEQUENCE.length) return null;
-  return { ...DRAFT_SEQUENCE[state.draftStepIndex], index: state.draftStepIndex };
+
+  const base = DRAFT_SEQUENCE[state.draftStepIndex];
+
+  // ✅ BP 先手方(颜色)计算：默认 BLUE；开启分离后由 bpFirstTeam 决定
+  const bpFirstSide: Side = (() => {
+    if (!state.separateSideAndBpOrder) return 'BLUE';
+    if (!state.bpFirstTeam) return 'BLUE';
+    const s = state.sides?.[state.bpFirstTeam];
+    return s || 'BLUE';
+  })();
+
+  // base 序列默认假设 BLUE 是 BP 先手方。若先手实际为 RED，则整体翻转。
+  const resolvedSide: Side = bpFirstSide === 'RED' ? (base.side === 'BLUE' ? 'RED' : 'BLUE') : base.side;
+
+  return { ...base, side: resolvedSide, index: state.draftStepIndex };
 };
 
 const getHero = (id: string | null) => HEROES.find((h) => h.id === id);
@@ -304,7 +322,7 @@ const matchesSearch = (h: Hero, term: string) => {
 
 const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: (id: string) => void }) => {
   const [activeTab, setActiveTab] = useState<'CREATE' | 'JOIN'>('CREATE');
-  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' ,timeLimit: 30 });
+  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD', timeLimit: 30, separateSideAndBpOrder: false });
   const [joinId, setJoinId] = useState('');
 
   return (
@@ -444,6 +462,35 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
                     {t === 0 ? '∞' : `${t}s`}
                   </button>
                 ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Map Side & BP Order</label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setConfig({ ...config, separateSideAndBpOrder: false })}
+                  className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                    !config.separateSideAndBpOrder
+                      ? 'bg-slate-700 border-slate-600 text-white shadow-md shadow-black/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  关闭
+                </button>
+                <button
+                  onClick={() => setConfig({ ...config, separateSideAndBpOrder: true })}
+                  className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                    config.separateSideAndBpOrder
+                      ? 'bg-emerald-600/90 border-emerald-600 text-white shadow-md shadow-emerald-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  开启
+                </button>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2">
+                开启后：蓝红方(地图)与 BP 先手可分离，在 SIDE SELECTION 里额外选择“BP首选 TEAM A / TEAM B”。
               </div>
             </div>
 
@@ -853,6 +900,10 @@ export default function App() {
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
 
+  // SIDE SELECTION（开启“地图与BP顺序分离”时需要同时选择 BP 首选队伍）
+  const [pendingSideForA, setPendingSideForA] = useState<Side | null>(null);
+  const [pendingBpFirstTeam, setPendingBpFirstTeam] = useState<TeamId | null>(null);
+
   const lastSeenSeqRef = useRef<number>(0);
   const clockOffsetRef = useRef<number>(0); // server_time - client_time (ms)
   const lastStepEndsAtRef = useRef<number>(0);
@@ -864,6 +915,28 @@ export default function App() {
       return () => clearTimeout(t);
     }
   }, [toast]);
+
+
+  // 进入 SIDE SELECTION / 切换局数时，重置本地待选项
+  useEffect(() => {
+    if (!state) return;
+
+    const sidesSet = !!(state.sides?.TEAM_A && state.sides?.TEAM_B);
+    const bpSet = !state.separateSideAndBpOrder || !!state.bpFirstTeam;
+
+    if (state.status === 'NOT_STARTED' && (!sidesSet || !bpSet)) {
+      setPendingSideForA(sidesSet ? (state.sides.TEAM_A as Side) : null);
+      setPendingBpFirstTeam(state.bpFirstTeam ?? null);
+    }
+  }, [
+    state?.currentGameIdx,
+    state?.status,
+    state?.sides?.TEAM_A,
+    state?.sides?.TEAM_B,
+    state?.bpFirstTeam,
+    state?.separateSideAndBpOrder,
+    state?.nextSideSelector,
+  ]);
 
 
   // WS Connection
@@ -1117,8 +1190,37 @@ export default function App() {
     if (wsRef.current) wsRef.current.close();
   };
 
-  const handleSideSelection = (selectedSide: Side) => {
-    send('ACTION_SUBMIT', { type: 'SET_SIDES', sideForA: selectedSide });
+  const handleSideSelection = (selectedSideForA: Side) => {
+    if (!state) return;
+
+    // ✅ 开启分离时：先在本地选中，最后点“确认”提交
+    if (state.separateSideAndBpOrder) {
+      setPendingSideForA(selectedSideForA);
+      return;
+    }
+
+    // 默认逻辑不变：点击立刻提交
+    send('ACTION_SUBMIT', { type: 'SET_SIDES', sideForA: selectedSideForA });
+  };
+
+  const submitSideSelection = () => {
+    if (!state) return;
+
+    if (!pendingSideForA) {
+      setToast({ msg: '请先选择蓝色方', type: 'error' });
+      return;
+    }
+
+    const payload: any = { type: 'SET_SIDES', sideForA: pendingSideForA };
+    if (state.separateSideAndBpOrder) {
+      if (!pendingBpFirstTeam) {
+        setToast({ msg: '请先选择 BP 首选队伍', type: 'error' });
+        return;
+      }
+      payload.bpFirstTeam = pendingBpFirstTeam;
+    }
+
+    send('ACTION_SUBMIT', payload);
   };
 
   const handleReportResult = (winner: TeamId) => send('ACTION_SUBMIT', { type: 'REPORT_RESULT', winner });
@@ -1135,7 +1237,9 @@ export default function App() {
     );
   }
 
-  const bothSidesSet = state.sides.TEAM_A && state.sides.TEAM_B;
+  const bothSidesSet = !!(state.sides.TEAM_A && state.sides.TEAM_B);
+  const bpPrioritySet = !state.separateSideAndBpOrder || !!state.bpFirstTeam;
+  const pregameConfigured = bothSidesSet && bpPrioritySet;
 
   const getTeamData = (teamId: string | null) => {
     if (teamId === 'TEAM_A') return state.teamA;
@@ -1254,7 +1358,7 @@ export default function App() {
                   <PlayCircle size={16} />
                 </button>
               )}
-              {state.status === 'NOT_STARTED' && bothSidesSet && (
+              {state.status === 'NOT_STARTED' && pregameConfigured && (
                 <button
                   onClick={() => send('ACTION_SUBMIT', { type: 'START_GAME' })}
                   disabled={!state.blueReady || !state.redReady}
@@ -1294,7 +1398,7 @@ export default function App() {
           status={state.status}
           isReady={state.blueReady}
           canControl={isBlueUser}
-          onToggleReady={canInteract || (bothSidesSet && isBlueUser) ? () => send('TOGGLE_READY', { side: 'BLUE' }) : undefined}
+          onToggleReady={canInteract || (pregameConfigured && isBlueUser) ? () => send('TOGGLE_READY', { side: 'BLUE' }) : undefined}
           swapSelection={swapSelection}
           onSwapClick={handleSwap}
           phase={state.phase}
@@ -1302,7 +1406,7 @@ export default function App() {
         />
 
         <div className="flex-1 flex flex-col bg-slate-950/20 relative">
-          {state.status === 'NOT_STARTED' && !bothSidesSet && (
+          {state.status === 'NOT_STARTED' && !pregameConfigured && (
             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm">
               <div className="bg-slate-900/70 border border-slate-700/60 rounded-3xl p-8 shadow-2xl max-w-3xl w-full mx-6">
                 <div className="text-center">
@@ -1317,20 +1421,82 @@ export default function App() {
                     <div className="text-xl font-black text-blue-300">这一局的蓝色方是：</div>
                     <div className="flex flex-col md:flex-row gap-5 md:gap-10 w-full justify-center">
                       <button onClick={() => handleSideSelection('BLUE')} className="group flex-1">
-                        <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
+                        <div
+                          className={`w-full h-36 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all shadow-xl ${
+                            state.separateSideAndBpOrder
+                              ? pendingSideForA === 'BLUE'
+                                ? 'border-blue-500/90 bg-blue-900/20'
+                                : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                              : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                          }`}
+                        >
                           <span className="text-3xl font-black text-white uppercase">{state.teamA.name}</span>
                           <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
                         </div>
                       </button>
                       <button onClick={() => handleSideSelection('RED')} className="group flex-1">
-                        <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
+                        <div
+                          className={`w-full h-36 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all shadow-xl ${
+                            state.separateSideAndBpOrder
+                              ? pendingSideForA === 'RED'
+                                ? 'border-blue-500/90 bg-blue-900/20'
+                                : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                              : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                          }`}
+                        >
                           <span className="text-3xl font-black text-white uppercase">{state.teamB.name}</span>
                           <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
                         </div>
                       </button>
                     </div>
+
+                    {state.separateSideAndBpOrder && (
+                      <>
+                        <div className="h-px w-full bg-slate-700/50 my-2" />
+
+                        <div className="text-xl font-black text-emerald-300">这一局的 BP 首选是：</div>
+                        <div className="flex flex-col md:flex-row gap-5 md:gap-10 w-full justify-center">
+                          <button onClick={() => setPendingBpFirstTeam('TEAM_A')} className="group flex-1">
+                            <div
+                              className={`w-full h-28 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-1 transition-all shadow-xl ${
+                                pendingBpFirstTeam === 'TEAM_A'
+                                  ? 'border-emerald-500/90 bg-emerald-900/15'
+                                  : 'border-slate-700/60 hover:border-emerald-500/70 hover:bg-emerald-900/10 hover:scale-[1.01]'
+                              }`}
+                            >
+                              <span className="text-2xl font-black text-white uppercase">{state.teamA.name}</span>
+                              <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
+                            </div>
+                          </button>
+
+                          <button onClick={() => setPendingBpFirstTeam('TEAM_B')} className="group flex-1">
+                            <div
+                              className={`w-full h-28 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-1 transition-all shadow-xl ${
+                                pendingBpFirstTeam === 'TEAM_B'
+                                  ? 'border-emerald-500/90 bg-emerald-900/15'
+                                  : 'border-slate-700/60 hover:border-emerald-500/70 hover:bg-emerald-900/10 hover:scale-[1.01]'
+                              }`}
+                            >
+                              <span className="text-2xl font-black text-white uppercase">{state.teamB.name}</span>
+                              <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
+                            </div>
+                          </button>
+                        </div>
+
+                        <button
+                          onClick={submitSideSelection}
+                          disabled={!pendingSideForA || !pendingBpFirstTeam}
+                          className="mt-2 px-12 py-3 rounded-2xl font-black text-white bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 disabled:from-slate-700 disabled:to-slate-700 disabled:opacity-60 transition-all"
+                        >
+                          确认
+                        </button>
+                      </>
+                    )}
+
                     <div className="text-[11px] text-slate-500 text-center">
-                      Tip: Click the team who will be BLUE side.
+                      {state.separateSideAndBpOrder
+                        ? 'Tip: 先选择蓝色方，再选择 BP 首选队伍，然后点击确认。'
+                        : 'Tip: Click the team who will be BLUE side.'}
                     </div>
                   </div>
                 )}
@@ -1567,7 +1733,7 @@ export default function App() {
           status={state.status}
           isReady={state.redReady}
           canControl={isRedUser}
-          onToggleReady={canInteract || (bothSidesSet && isRedUser) ? () => send('TOGGLE_READY', { side: 'RED' }) : undefined}
+          onToggleReady={canInteract || (pregameConfigured && isRedUser) ? () => send('TOGGLE_READY', { side: 'RED' }) : undefined}
           swapSelection={swapSelection}
           onSwapClick={handleSwap}
           phase={state.phase}

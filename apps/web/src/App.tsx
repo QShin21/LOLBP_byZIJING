@@ -912,6 +912,8 @@ const FloatingChatWindow = ({
   size,
   unread,
   messages,
+  teamAName,
+  teamBName,
   selfRole,
   canSend,
   onClose,
@@ -927,6 +929,8 @@ const FloatingChatWindow = ({
   size: FloatingChatSize;
   unread: number;
   messages: ChatMessage[];
+  teamAName: string;
+  teamBName: string;
   selfRole: UserRole;
   canSend: boolean;
   onClose: () => void;
@@ -1087,7 +1091,15 @@ const FloatingChatWindow = ({
                 messages.map((m) => {
                   const isSelf = m.role === selfRole;
                   const roleLabel =
-                    m.role === 'TEAM_A' ? '队伍A' : m.role === 'TEAM_B' ? '队伍B' : m.role === 'REFEREE' ? '裁判' : m.role;
+                    m.role === 'TEAM_A'
+                      ? (teamAName || '队伍A')
+                      : m.role === 'TEAM_B'
+                      ? (teamBName || '队伍B')
+                      : m.role === 'REFEREE'
+                      ? '裁判'
+                      : m.role === 'SPECTATOR'
+                      ? '观战'
+                      : m.role;
 
                   return (
                     <div key={m.id} className={`flex ${isSelf ? 'justify-end' : 'justify-start'}`}>
@@ -1693,6 +1705,8 @@ export default function App() {
           size={chatSize}
           unread={chatUnread}
           messages={chatMessages}
+          teamAName={state?.teamA?.name ?? '队伍A'}
+          teamBName={state?.teamB?.name ?? '队伍B'}
           selfRole={userRole as UserRole}
           canSend={showChatForUser}
           onClose={() => setChatOpen(false)}

@@ -9,7 +9,7 @@ import {
   replay,
   SPECIAL_ID_RANDOM
 } from './game';
-import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions, getRoomChat, appendRoomChatMessage, ChatMessage } from './db';
+import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions, getRoomChat, appendRoomChatMessage, removeLastAction, ChatMessage } from './db';
 
 const PORT = 8080;
 
@@ -259,6 +259,7 @@ wss.on('connection', (ws, req) => {
 
       if (data.type === 'ACTION_UNDO') {
         if (room.state.history.length > 0) {
+          removeLastAction(roomId);
           const newHistory = room.state.history.slice(0, -1);
           const newState = replay(newHistory, Date.now(), room.state);
           saveRoomState(roomId, newState);

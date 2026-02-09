@@ -1845,6 +1845,14 @@ export default function App() {
                   <Play size={16} />
                 </button>
               )}
+              <button
+                onClick={() => send('ACTION_UNDO')}
+                disabled={state.history.length === 0}
+                className="p-2 hover:text-orange-300 disabled:opacity-30 transition-colors"
+                title="撤销上一步"
+              >
+                <Minus size={16} />
+              </button>
               <button onClick={() => send('ACTION_SUBMIT', { type: 'RESET_GAME' })} className="p-2 hover:text-white transition-colors">
                 <RotateCcw size={16} />
               </button>

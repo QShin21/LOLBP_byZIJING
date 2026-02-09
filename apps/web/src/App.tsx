@@ -1447,6 +1447,9 @@ export default function App() {
 
           } else if (msg.type === 'CHAT_REJECTED') {
             setToast({ msg: msg.payload?.reason || '聊天消息发送失败', type: 'error' });
+          } else if (msg.type === 'FORCED_LOGOUT') {
+            setUserRole(null);
+            setToast({ msg: msg.payload?.reason || '该身份已在其他设备登录，当前连接已退出', type: 'error' });
           } else if (msg.type === 'ACTION_REJECTED') {
             setToast({ msg: msg.payload.reason, type: 'error' });
           }
@@ -1466,6 +1469,16 @@ export default function App() {
       } catch {}
     };
   }, [roomId]);
+
+  useEffect(() => {
+    if (userRole !== 'REFEREE' && userRole !== 'TEAM_A' && userRole !== 'TEAM_B') return;
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'ROLE_CLAIM',
+      payload: { actorRole: userRole },
+    }));
+  }, [userRole, isConnected]);
 
 
   const send = (type: string, payload: any = {}) => {

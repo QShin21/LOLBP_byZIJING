@@ -17,6 +17,7 @@ interface Room {
   id: string;
   state: DraftState;
   clients: Set<WebSocket>;
+  roleSessions: Map<'REFEREE' | 'TEAM_A' | 'TEAM_B', WebSocket>;
   lastActivity: number;
   chat: ChatMessage[];
 }
@@ -70,6 +71,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: safeState,
         clients: new Set(),
+        roleSessions: new Map(),
         lastActivity: Date.now(),
         chat: getRoomChat(roomId)
       };
@@ -98,6 +100,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: initialState,
         clients: new Set(),
+        roleSessions: new Map(),
         lastActivity: Date.now(),
         chat: []
       };
@@ -169,6 +172,7 @@ wss.on('connection', (ws, req) => {
   const urlParams = new URLSearchParams(parse(req.url || '').query || '');
   const roomId = urlParams.get('room') || 'default';
   const room = getOrCreateRoom(roomId);
+  let claimedRole: 'REFEREE' | 'TEAM_A' | 'TEAM_B' | null = null;
 
   room.clients.add(ws);
 
@@ -196,6 +200,28 @@ wss.on('connection', (ws, req) => {
         try {
           ws.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() }));
         } catch {}
+        return;
+      }
+
+      if (data.type === 'ROLE_CLAIM') {
+        const role = (data.payload?.actorRole || '').toString();
+        const allowed = role === 'REFEREE' || role === 'TEAM_A' || role === 'TEAM_B';
+        if (!allowed) return;
+
+        const typedRole = role as 'REFEREE' | 'TEAM_A' | 'TEAM_B';
+        const existingClient = room.roleSessions.get(typedRole);
+
+        if (existingClient && existingClient !== ws && existingClient.readyState === WebSocket.OPEN) {
+          existingClient.send(JSON.stringify({
+            type: 'FORCED_LOGOUT',
+            payload: { reason: `该身份已在其他设备登录：${typedRole}` },
+            timestamp: Date.now()
+          }));
+          existingClient.close(4001, 'Logged in on another device');
+        }
+
+        room.roleSessions.set(typedRole, ws);
+        claimedRole = typedRole;
         return;
       }
 
@@ -282,6 +308,9 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     room.clients.delete(ws);
+    if (claimedRole && room.roleSessions.get(claimedRole) === ws) {
+      room.roleSessions.delete(claimedRole);
+    }
   });
 });
 

@@ -22,6 +22,20 @@ interface Room {
   chat: ChatMessage[];
 }
 
+const appendAndBroadcastChatMessage = (room: Room, roomId: string, message: ChatMessage) => {
+  room.chat.push(message);
+  if (room.chat.length > 200) room.chat = room.chat.slice(-200);
+
+  try {
+    appendRoomChatMessage(roomId, message, 200);
+  } catch {}
+
+  const out = JSON.stringify({ type: 'CHAT_MESSAGE', payload: message, timestamp: Date.now() });
+  room.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) client.send(out);
+  });
+};
+
 const rooms = new Map<string, Room>();
 
 const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
@@ -222,6 +236,14 @@ wss.on('connection', (ws, req) => {
 
         room.roleSessions.set(typedRole, ws);
         claimedRole = typedRole;
+
+        const joinRecord: ChatMessage = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          ts: Date.now(),
+          role: 'SYSTEM',
+          text: `${typedRole} 进入了房间`
+        };
+        appendAndBroadcastChatMessage(room, roomId, joinRecord);
         return;
       }
 
@@ -245,18 +267,7 @@ wss.on('connection', (ws, req) => {
           text
         };
 
-        room.chat.push(chatMsg);
-        if (room.chat.length > 200) room.chat = room.chat.slice(-200);
-
-        // persist
-        try {
-          appendRoomChatMessage(roomId, chatMsg, 200);
-        } catch {}
-
-        const out = JSON.stringify({ type: 'CHAT_MESSAGE', payload: chatMsg, timestamp: Date.now() });
-        room.clients.forEach(client => {
-          if (client.readyState === WebSocket.OPEN) client.send(out);
-        });
+        appendAndBroadcastChatMessage(room, roomId, chatMsg);
 
         return;
       }

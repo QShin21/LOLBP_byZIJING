@@ -61,6 +61,24 @@ export const saveActionAndUpdateState = (roomId: string, action: DraftAction, ne
   saveRoomState(roomId, newState);
 };
 
+// 删除最后一条 Action（用于撤销）
+export const removeLastAction = (roomId: string): DraftAction[] => {
+  const actionFile = path.join(ACTIONS_DIR, `${roomId}.json`);
+  if (!fs.existsSync(actionFile)) return [];
+
+  try {
+    const actions: DraftAction[] = JSON.parse(fs.readFileSync(actionFile, 'utf-8'));
+    if (!Array.isArray(actions) || actions.length === 0) return [];
+
+    const trimmed = actions.slice(0, -1);
+    fs.writeFileSync(actionFile, JSON.stringify(trimmed, null, 2));
+    return trimmed;
+  } catch (e) {
+    console.error('Error trimming actions file', e);
+    return [];
+  }
+};
+
 // 获取历史 Actions
 export const getRoomActions = (roomId: string, afterSeq: number = 0): DraftAction[] => {
   const actionFile = path.join(ACTIONS_DIR, `${roomId}.json`);

@@ -52,6 +52,7 @@ type SeriesMode = 'BO1' | 'BO2' | 'BO3' | 'BO5';
 type DraftMode = 'STANDARD' | 'FEARLESS';
 type TeamId = 'TEAM_A' | 'TEAM_B';
 type UserRole = 'REFEREE' | 'SPECTATOR' | TeamId;
+type ChatRole = UserRole | 'SYSTEM';
 
 const SPECIAL_ID_NONE = 'special_none';
 const SPECIAL_ID_RANDOM = 'special_random';
@@ -78,7 +79,7 @@ interface DraftAction {
 interface ChatMessage {
   id: string;
   ts: number; // ms
-  role: UserRole;
+  role: ChatRole;
   text: string;
 }
 
@@ -1099,6 +1100,8 @@ const FloatingChatWindow = ({
                       ? '裁判'
                       : m.role === 'SPECTATOR'
                       ? '观战'
+                      : m.role === 'SYSTEM'
+                      ? '系统'
                       : m.role;
 
                   return (
@@ -1447,6 +1450,9 @@ export default function App() {
 
           } else if (msg.type === 'CHAT_REJECTED') {
             setToast({ msg: msg.payload?.reason || '聊天消息发送失败', type: 'error' });
+          } else if (msg.type === 'FORCED_LOGOUT') {
+            setUserRole(null);
+            setToast({ msg: msg.payload?.reason || '该身份已在其他设备登录，当前连接已退出', type: 'error' });
           } else if (msg.type === 'ACTION_REJECTED') {
             setToast({ msg: msg.payload.reason, type: 'error' });
           }
@@ -1466,6 +1472,16 @@ export default function App() {
       } catch {}
     };
   }, [roomId]);
+
+  useEffect(() => {
+    if (userRole !== 'REFEREE' && userRole !== 'TEAM_A' && userRole !== 'TEAM_B') return;
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'ROLE_CLAIM',
+      payload: { actorRole: userRole },
+    }));
+  }, [userRole, isConnected]);
 
 
   const send = (type: string, payload: any = {}) => {

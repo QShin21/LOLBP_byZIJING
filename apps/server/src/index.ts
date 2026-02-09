@@ -17,6 +17,7 @@ interface Room {
   id: string;
   state: DraftState;
   clients: Set<WebSocket>;
+  roleSessions: Map<'REFEREE' | 'TEAM_A' | 'TEAM_B', WebSocket>;
   lastActivity: number;
   chat: ChatMessage[];
 }
@@ -70,6 +71,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: safeState,
         clients: new Set(),
+        roleSessions: new Map(),
         lastActivity: Date.now(),
         chat: getRoomChat(roomId)
       };
@@ -98,6 +100,7 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: initialState,
         clients: new Set(),
+        roleSessions: new Map(),
         lastActivity: Date.now(),
         chat: []
       };
@@ -120,6 +123,33 @@ const broadcastToRoom = (room: Room) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
+  });
+};
+
+const roleDisplayName = (room: Room, role: 'REFEREE' | 'TEAM_A' | 'TEAM_B') => {
+  if (role === 'REFEREE') return '裁判';
+  if (role === 'TEAM_A') return room.state.teamA?.name || '队伍A';
+  return room.state.teamB?.name || '队伍B';
+};
+
+const appendSystemChat = (room: Room, roomId: string, text: string) => {
+  const chatMsg: ChatMessage = {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    ts: Date.now(),
+    role: 'SYSTEM',
+    text,
+  };
+
+  room.chat.push(chatMsg);
+  if (room.chat.length > 200) room.chat = room.chat.slice(-200);
+
+  try {
+    appendRoomChatMessage(roomId, chatMsg, 200);
+  } catch {}
+
+  const out = JSON.stringify({ type: 'CHAT_MESSAGE', payload: chatMsg, timestamp: Date.now() });
+  room.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) client.send(out);
   });
 };
 
@@ -169,6 +199,7 @@ wss.on('connection', (ws, req) => {
   const urlParams = new URLSearchParams(parse(req.url || '').query || '');
   const roomId = urlParams.get('room') || 'default';
   const room = getOrCreateRoom(roomId);
+  let claimedRole: 'REFEREE' | 'TEAM_A' | 'TEAM_B' | null = null;
 
   room.clients.add(ws);
 
@@ -196,6 +227,37 @@ wss.on('connection', (ws, req) => {
         try {
           ws.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() }));
         } catch {}
+        return;
+      }
+
+      if (data.type === 'ROLE_CLAIM') {
+        const role = (data.payload?.actorRole || '').toString();
+        const allowed = role === 'REFEREE' || role === 'TEAM_A' || role === 'TEAM_B';
+        if (!allowed) return;
+
+        const typedRole = role as 'REFEREE' | 'TEAM_A' | 'TEAM_B';
+        const existingClient = room.roleSessions.get(typedRole);
+
+        if (existingClient && existingClient !== ws && existingClient.readyState === WebSocket.OPEN) {
+          existingClient.send(JSON.stringify({
+            type: 'FORCED_LOGOUT',
+            payload: { reason: `该身份已在其他设备登录：${typedRole}` },
+            timestamp: Date.now()
+          }));
+          existingClient.close(4001, 'Logged in on another device');
+        }
+
+        if (claimedRole && claimedRole !== typedRole && room.roleSessions.get(claimedRole) === ws) {
+          room.roleSessions.delete(claimedRole);
+        }
+
+        const roleChanged = claimedRole !== typedRole;
+        room.roleSessions.set(typedRole, ws);
+        claimedRole = typedRole;
+
+        if (roleChanged) {
+          appendSystemChat(room, roomId, `${roleDisplayName(room, typedRole)}进入房间`);
+        }
         return;
       }
 
@@ -282,6 +344,9 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     room.clients.delete(ws);
+    if (claimedRole && room.roleSessions.get(claimedRole) === ws) {
+      room.roleSessions.delete(claimedRole);
+    }
   });
 });
 

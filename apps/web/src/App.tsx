@@ -19,11 +19,16 @@ import {
   WifiOff,
   Search,
   Copy,
+
+  MessageSquare,
+  Minus,
+  X,
 } from 'lucide-react';
 
 // ✅ 从 data/heroes.ts 导入（该文件由脚本生成，包含 nameCn / titleCn）
 import { RAW_HEROES as RAW_HEROES_DATA, Hero as DataHero } from './data/heroes';
 import { pinyin, match } from 'pinyin-pro';
+
 // ==========================================
 // MODULE: Types & Constants
 // ==========================================
@@ -50,6 +55,8 @@ type DraftMode = 'STANDARD' | 'FEARLESS';
 type TeamId = 'TEAM_A' | 'TEAM_B';
 type UserRole = 'REFEREE' | 'SPECTATOR' | TeamId;
 type LobbyConfig = {
+  timeLimit: number;
+  separateSideAndBpOrder: boolean;
   matchTitle: string;
   teamA: string;
   teamB: string;
@@ -68,7 +75,7 @@ const WS_BASE_URL = trimTrailingSlash(
   import.meta.env.VITE_WS_URL || API_BASE_URL.replace(/^http/, 'ws')
 );
 
-// ✅ App 内使用的 Hero 类型：包含脚本生成的中英文信息，并把 roles 收窄到 Role[]
+// ✅ App 内使用的 Hero 类型
 type Hero = Omit<DataHero, 'roles'> & { roles: Role[] };
 
 interface DraftStep {
@@ -87,6 +94,13 @@ interface DraftAction {
   actorRole?: string;
 }
 
+interface ChatMessage {
+  id: string;
+  ts: number; // ms
+  role: UserRole;
+  text: string;
+}
+
 interface GameResultSnapshot {
   gameIdx: number;
   winner: TeamId;
@@ -103,11 +117,16 @@ interface DraftState {
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
+  timeLimit: number; // ✅ 确保这里有 timeLimit
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number;
   sides: { [key in TeamId]: Side | null };
   nextSideSelector: TeamId | 'REFEREE' | null;
+  // ✅ 是否开启“地图(蓝红)与BP顺序分离”
+  separateSideAndBpOrder: boolean;
+  // ✅ 开启时：BP 首选队伍（TEAM_A / TEAM_B）
+  bpFirstTeam: TeamId | null;
   seriesHistory: GameResultSnapshot[];
 
   status: DraftStatus;
@@ -131,8 +150,6 @@ interface DraftState {
 // MODULE: Helpers & Data
 // ==========================================
 
-// PURE LOCAL MODE
-// Images must be located in: apps/web/public/heroes/{id}.png
 const LOCAL_IMG_BASE = '/heroes';
 
 const getHeroImageUrl = (hero: Hero | undefined | null) => {
@@ -178,7 +195,21 @@ const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
 
 const getCurrentStep = (state: DraftState): DraftStep | null => {
   if (state.draftStepIndex >= DRAFT_SEQUENCE.length) return null;
-  return { ...DRAFT_SEQUENCE[state.draftStepIndex], index: state.draftStepIndex };
+
+  const base = DRAFT_SEQUENCE[state.draftStepIndex];
+
+  // ✅ BP 先手方(颜色)计算：默认 BLUE；开启分离后由 bpFirstTeam 决定
+  const bpFirstSide: Side = (() => {
+    if (!state.separateSideAndBpOrder) return 'BLUE';
+    if (!state.bpFirstTeam) return 'BLUE';
+    const s = state.sides?.[state.bpFirstTeam];
+    return s || 'BLUE';
+  })();
+
+  // base 序列默认假设 BLUE 是 BP 先手方。若先手实际为 RED，则整体翻转。
+  const resolvedSide: Side = bpFirstSide === 'RED' ? (base.side === 'BLUE' ? 'RED' : 'BLUE') : base.side;
+
+  return { ...base, side: resolvedSide, index: state.draftStepIndex };
 };
 
 const getHero = (id: string | null) => HEROES.find((h) => h.id === id);
@@ -189,7 +220,6 @@ const getHeroDisplayName = (h: Hero | null | undefined) => {
   return h.titleCn || h.nameCn || h.name;
 };
 
-// ✅ 搜索支持：英文名 / 中文名 / 中文称号
 // --- fuzzy search helpers ---
 const _norm = (s: string) =>
   (s || '')
@@ -208,15 +238,15 @@ const _lev = (a: string, b: string) => {
   const dp = new Array(n + 1);
   for (let j = 0; j <= n; j++) dp[j] = j;
   for (let i = 1; i <= m; i++) {
-    let prev = dp[0]; // dp[i-1][j-1]
-    dp[0] = i;        // dp[i][0]
+    let prev = dp[0];
+    dp[0] = i;
     for (let j = 1; j <= n; j++) {
       const tmp = dp[j];
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
       dp[j] = Math.min(
-        dp[j] + 1,      // deletion
-        dp[j - 1] + 1,  // insertion
-        prev + cost     // substitution
+        dp[j] + 1,
+        dp[j - 1] + 1,
+        prev + cost
       );
       prev = tmp;
     }
@@ -224,7 +254,6 @@ const _lev = (a: string, b: string) => {
   return dp[n];
 };
 
-// fuzzy substring: allow small typos (edit distance) against any substring
 const _fuzzySubstr = (hayRaw: string, needleRaw: string, maxDist: number) => {
   const hay = _norm(hayRaw);
   const needle = _norm(needleRaw);
@@ -234,7 +263,6 @@ const _fuzzySubstr = (hayRaw: string, needleRaw: string, maxDist: number) => {
   const n = needle.length;
   if (!n) return true;
 
-  // try windows with len n-1, n, n+1 (tolerate missing/extra char)
   const lens = [Math.max(1, n - 1), n, n + 1];
 
   for (const L of lens) {
@@ -247,7 +275,6 @@ const _fuzzySubstr = (hayRaw: string, needleRaw: string, maxDist: number) => {
   return false;
 };
 
-// threshold by query length
 const _distLimit = (q: string) => {
   const len = _norm(q).length;
   if (len <= 3) return 1;
@@ -255,7 +282,6 @@ const _distLimit = (q: string) => {
   return 3;
 };
 
-// cache computed fields per hero id (avoid recalculating pinyin all the time)
 const _SEARCH_CACHE = new Map<string, { cn: string; en: string; py: string; ini: string }>();
 const _getSearchMeta = (h: Hero) => {
   const cached = _SEARCH_CACHE.get(h.id);
@@ -264,8 +290,8 @@ const _getSearchMeta = (h: Hero) => {
   const cnRaw = `${h.titleCn || ''}${h.nameCn || ''}`;
   const enRaw = `${h.id} ${h.name || ''} ${h.nameCn || ''} ${h.titleCn || ''}`;
 
-  const pyRaw = pinyin(cnRaw, { toneType: 'none' }); // e.g. "an yi jian mo"
-  const iniRaw = pinyin(cnRaw, { pattern: 'initial', toneType: 'none' }); // e.g. "a y j m" :contentReference[oaicite:2]{index=2}
+  const pyRaw = pinyin(cnRaw, { toneType: 'none' });
+  const iniRaw = pinyin(cnRaw, { pattern: 'initial', toneType: 'none' });
 
   const meta = {
     cn: _norm(cnRaw),
@@ -277,7 +303,6 @@ const _getSearchMeta = (h: Hero) => {
   return meta;
 };
 
-// ✅ Enhanced: 中文/拼音/首字母 + 容错模糊
 const matchesSearch = (h: Hero, term: string) => {
   const raw = (term || '').trim();
   if (!raw) return true;
@@ -288,44 +313,26 @@ const matchesSearch = (h: Hero, term: string) => {
   const { cn, en, py, ini } = _getSearchMeta(h);
   const limit = _distLimit(q);
 
-// 1) 直接中文输入：支持“称号/中文名”的模糊 + 同音(拼音)匹配
   if (_hasHan(raw)) {
     const qCn = _norm(raw);
     if (!qCn) return true;
-
-    // ✅ 1) 中文只做“包含”，不做编辑距离（大幅减少误匹配）
     if (cn.includes(qCn)) return true;
-
-    // ✅ 2) 同音：中文 -> 拼音，但启用条件更严格
-    // - 至少 2 个汉字
     const hanCount = (raw.match(/[\u4e00-\u9fff]/g) || []).length;
     if (hanCount < 2) return false;
-
-    const qpy = _norm(pinyin(raw, { toneType: 'none' })); // 朗姆 -> langmu
+    const qpy = _norm(pinyin(raw, { toneType: 'none' }));
     if (!qpy || qpy.length < 4) return false;
-
-    // 只做包含/前缀（不做拼音编辑距离）
     if (py.includes(qpy) || py.startsWith(qpy)) return true;
-
-    // ✅ 3) 首字母：仅对 2~4 个汉字启用，并且只做 startsWith
     if (hanCount <= 4) {
-      const qini = _norm(pinyin(raw, { pattern: 'initial', toneType: 'none' })); // 朗姆 -> lm
+      const qini = _norm(pinyin(raw, { pattern: 'initial', toneType: 'none' }));
       if (qini && qini.length >= 2 && ini.startsWith(qini)) return true;
     }
     return false;
   }
 
-
-
-  // 2) 英文/拼音输入：
-  // 2.1 英文 alias / id / 英文名
   if (en.includes(q)) return true;
   if (_fuzzySubstr(en, q, Math.min(2, limit))) return true;
-
-  // 2.2 拼音全拼/首字母（含容错）
   if (py.includes(q) || ini.includes(q)) return true;
 
-  // pinyin-pro 自带匹配：支持 "zwp" / "zhongwp" / "zhongwenpin" 这种混合规则 :contentReference[oaicite:3]{index=3}
   const cnText = (h.titleCn || h.nameCn || '');
   try {
     const hit = match(cnText, q);
@@ -334,10 +341,7 @@ const matchesSearch = (h: Hero, term: string) => {
     // pinyin-pro can throw for rare punctuation-only input; fallback matching continues below.
   }
 
-  // 容错：对拼音串做 fuzzy substring（打错 1~2 个字母、漏字也能搜到）
   if (_fuzzySubstr(py, q, limit)) return true;
-
-  // 首字母一般很短，容错给 1 就够（避免误匹配太多）
   if (_fuzzySubstr(ini, q, 1)) return true;
 
   return false;
@@ -350,7 +354,7 @@ const matchesSearch = (h: Hero, term: string) => {
 
 const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promise<void>; onJoin: (id: string) => void }) => {
   const [activeTab, setActiveTab] = useState<'CREATE' | 'JOIN'>('CREATE');
-  const [config, setConfig] = useState<LobbyConfig>({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' });
+  const [config, setConfig] = useState<LobbyConfig>({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD', timeLimit: 30, separateSideAndBpOrder: false });
   const [joinId, setJoinId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -412,7 +416,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
         {activeTab === 'CREATE' ? (
           <div className="space-y-4">
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Match Title (Optional)</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">比赛名称 (Match Title)</label>
               <input
                 type="text"
                 className="w-full bg-slate-950/80 border border-slate-700/70 rounded-xl p-3 text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-yellow-500/30 focus:border-yellow-500/30"
@@ -424,7 +428,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Team A Name</label>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">队伍一(Team A Name)</label>
                 <input
                   type="text"
                   className="w-full bg-slate-950/80 border border-slate-700/70 rounded-xl p-3 text-white focus:outline-none focus:ring-2 focus:ring-yellow-500/20 focus:border-yellow-500/30"
@@ -433,7 +437,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Team B Name</label>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">队伍二(Team B Name)</label>
                 <input
                   type="text"
                   className="w-full bg-slate-950/80 border border-slate-700/70 rounded-xl p-3 text-white focus:outline-none focus:ring-2 focus:ring-yellow-500/20 focus:border-yellow-500/30"
@@ -444,7 +448,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Series Format</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">场次选择(Series Format)</label>
               <div className="flex gap-2">
                 {SERIES_MODE_OPTIONS.map((m) => (
                   <button
@@ -463,7 +467,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Draft Mode</label>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">BP模式(Draft Mode)</label>
               <div className="flex gap-2">
                 <button
                   onClick={() => setConfig({ ...config, draftMode: 'STANDARD' })}
@@ -473,7 +477,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
                 >
-                  Standard
+                  竞技征兆（Standard）
                 </button>
                 <button
                   onClick={() => setConfig({ ...config, draftMode: 'FEARLESS' })}
@@ -483,7 +487,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
                       : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
                   }`}
                 >
-                  <Skull size={16} /> Fearless
+                  <Skull size={16} /> 无畏征兆（Fearless）
                 </button>
               </div>
               <div className="text-[11px] text-slate-500 mt-2">
@@ -498,6 +502,54 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promis
                 {error}
               </div>
             )}
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">时间选项(Time Per Turn)</label>
+              <div className="flex gap-2">
+                {[30, 60, 90, 0].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setConfig({ ...config, timeLimit: t })}
+                    className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                      config.timeLimit === t
+                        ? 'bg-purple-600/90 border-purple-600 text-white shadow-md shadow-purple-900/20'
+                        : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                    }`}
+                  >
+                    {t === 0 ? '∞' : `${t}s`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">BP与地图是否分离（Map Side & BP Order）</label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setConfig({ ...config, separateSideAndBpOrder: false })}
+                  className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                    !config.separateSideAndBpOrder
+                      ? 'bg-slate-700 border-slate-600 text-white shadow-md shadow-black/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  关闭(close)
+                </button>
+                <button
+                  onClick={() => setConfig({ ...config, separateSideAndBpOrder: true })}
+                  className={`flex-1 py-2.5 rounded-xl border font-bold transition-all ${
+                    config.separateSideAndBpOrder
+                      ? 'bg-emerald-600/90 border-emerald-600 text-white shadow-md shadow-emerald-900/20'
+                      : 'bg-slate-950/70 border-slate-700/70 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  开启(open)
+                </button>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2">
+                开启后：蓝红方(地图)与 BP 先手可分离， 额外选择“BP首选 TEAM A / TEAM B”。
+              </div>
+            </div>
 
             <button
               onClick={createRoom}
@@ -595,7 +647,7 @@ const HeroCard = ({ hero, status, onClick, isHovered, isFearlessBanned }: any) =
 
   const imageUrl = useMemo(() => getHeroImageUrl(hero), [hero]);
 
-  const primary = hero?.titleCn || hero?.nameCn || hero?.name; // ✅ 优先称号
+  const primary = hero?.titleCn || hero?.nameCn || hero?.name;
   const secondary = hero?.titleCn ? (hero?.nameCn || hero?.name) : (hero?.name ? `(${hero.name})` : '');
 
   const clickable = !isFearlessBanned && status === 'AVAILABLE';
@@ -769,7 +821,7 @@ const TeamPanel = ({
           const isSwapMode = phase === 'SWAP';
           const allowClick = isSwapMode && hero && canInteract;
 
-          return (//左右英雄框
+          return (
             <div
               key={i}
               onClick={() => (allowClick ? onSwapClick(side, i) : undefined)}
@@ -848,7 +900,7 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
   const redTeamName = game.redSideTeam === 'TEAM_A' ? state.teamA?.name : state.teamB?.name;
   const winnerName = game.winner === 'TEAM_A' ? state.teamA?.name : state.teamB?.name;
 
-  const renderMini = (id: string, kind: 'BAN' | 'PICK') => {//结束战报界面
+  const renderMini = (id: string, kind: 'BAN' | 'PICK') => {
     const hero = getHero(id);
     const img = hero ? getHeroImageUrl(hero) : null;
     const title = hero ? getHeroDisplayName(hero) : '';
@@ -892,6 +944,280 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
   );
 };
 
+
+// ==========================================
+// FLOATING CHAT (Draggable / Minimizable)
+// ==========================================
+
+type FloatingChatPosition = { x: number; y: number };
+
+type FloatingChatSize = { w: number; h: number };
+
+const formatChatTime = (ts: number) => {
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+};
+
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+
+const FloatingChatWindow = ({
+  open,
+  minimized,
+  position,
+  size,
+  unread,
+  messages,
+  teamAName,
+  teamBName,
+  selfRole,
+  canSend,
+  onClose,
+  onToggleMinimize,
+  onPositionChange,
+  onSizeChange,
+  onSend,
+  onMarkRead,
+}: {
+  open: boolean;
+  minimized: boolean;
+  position: FloatingChatPosition;
+  size: FloatingChatSize;
+  unread: number;
+  messages: ChatMessage[];
+  teamAName: string;
+  teamBName: string;
+  selfRole: UserRole;
+  canSend: boolean;
+  onClose: () => void;
+  onToggleMinimize: () => void;
+  onPositionChange: (p: FloatingChatPosition) => void;
+  onSizeChange: (s: FloatingChatSize) => void;
+  onSend: (text: string) => void;
+  onMarkRead: () => void;
+}) => {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [input, setInput] = useState('');
+
+  // Scroll to bottom when new messages arrive (only if expanded)
+  useEffect(() => {
+    if (!open || minimized) return;
+    const el = listRef.current;
+    if (!el) return;
+    // next tick
+    const t = window.setTimeout(() => {
+      el.scrollTop = el.scrollHeight;
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [messages.length, open, minimized]);
+
+  // Mark read when expanded
+  useEffect(() => {
+    if (open && !minimized) onMarkRead();
+  }, [open, minimized, onMarkRead]);
+
+  // Observe resizing (CSS resize handle)
+  useEffect(() => {
+    if (!open || minimized) return;
+    const el = boxRef.current;
+    if (!el) return;
+
+    const ro = new ResizeObserver(() => {
+      const rect = el.getBoundingClientRect();
+      const w = Math.round(rect.width);
+      const h = Math.round(rect.height);
+      onSizeChange({ w, h });
+    });
+
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open, minimized, onSizeChange]);
+
+  const startDrag = (e: React.PointerEvent) => {
+    if (!open) return;
+    // only left button / primary pointer
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
+
+    const rect = boxRef.current?.getBoundingClientRect();
+    const dx = e.clientX - (rect?.left ?? position.x);
+    const dy = e.clientY - (rect?.top ?? position.y);
+
+    const onMove = (ev: PointerEvent) => {
+      const w = boxRef.current?.offsetWidth ?? size.w;
+      const h = boxRef.current?.offsetHeight ?? (minimized ? 44 : size.h);
+
+      const maxX = window.innerWidth - w - 8;
+      const maxY = window.innerHeight - h - 8;
+
+      const next = {
+        x: clamp(ev.clientX - dx, 8, Math.max(8, maxX)),
+        y: clamp(ev.clientY - dy, 8, Math.max(8, maxY)),
+      };
+      onPositionChange(next);
+    };
+
+    const onUp = () => {
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const sendNow = () => {
+    const text = input.trim();
+    if (!text) return;
+    onSend(text);
+    setInput('');
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[60] pointer-events-none">
+      <div
+        ref={boxRef}
+        className="absolute pointer-events-auto max-w-[92vw] max-h-[92vh] bg-slate-900/80 backdrop-blur-2xl border border-slate-700/60 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+        style={{
+          left: position.x,
+          top: position.y,
+          width: size.w,
+          height: minimized ? 44 : size.h,
+          minWidth: 280,
+          minHeight: minimized ? 44 : 240,
+          resize: minimized ? 'none' : 'both',
+          boxSizing: 'border-box',
+        }}
+      >
+        {/* Header (drag handle) */}
+        <div
+          className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-950/40 border-b border-slate-700/60 cursor-move select-none"
+          onPointerDown={startDrag}
+          style={{ touchAction: 'none' }}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <MessageSquare size={14} className="text-yellow-400 shrink-0" />
+            <div className="font-black text-xs text-slate-200 truncate">聊天交流</div>
+            {unread > 0 && (
+              <span className="ml-1 text-[10px] font-black px-1.5 py-0.5 rounded-full bg-red-600/90 text-white border border-red-400/30">
+                {unread > 99 ? '99+' : unread}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleMinimize();
+              }}
+              className="p-1.5 rounded-lg hover:bg-slate-800/70 text-slate-200"
+              title={minimized ? '展开' : '最小化'}
+            >
+              <Minus size={14} />
+            </button>
+            <button
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose();
+              }}
+              className="p-1.5 rounded-lg hover:bg-slate-800/70 text-slate-200"
+              title="关闭"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+
+        {!minimized && (
+          <div className="flex flex-col flex-1 min-h-0">
+            {/* Messages */}
+            <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2">
+              {messages.length === 0 ? (
+                <div className="text-xs text-slate-500 py-6 text-center">暂无消息</div>
+              ) : (
+                messages.map((m) => {
+                  const isSelf = m.role === selfRole;
+                  const roleLabel =
+                    m.role === 'TEAM_A'
+                      ? (teamAName || '队伍A')
+                      : m.role === 'TEAM_B'
+                      ? (teamBName || '队伍B')
+                      : m.role === 'REFEREE'
+                      ? '裁判'
+                      : m.role === 'SPECTATOR'
+                      ? '观战'
+                      : m.role;
+
+                  return (
+                    <div key={m.id} className={`flex ${isSelf ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[78%]`}>
+                        <div className={`text-[10px] mb-0.5 ${isSelf ? 'text-right text-slate-400' : 'text-slate-500'}`}>
+                          <span className="font-black">{roleLabel}</span>
+                          <span className="mx-1 text-slate-700">•</span>
+                          <span>{formatChatTime(m.ts)}</span>
+                        </div>
+                        <div
+                          className={[
+                            'text-sm whitespace-pre-wrap break-words px-3 py-2 rounded-2xl border',
+                            isSelf
+                              ? 'bg-yellow-500/15 border-yellow-500/30 text-slate-100'
+                              : 'bg-slate-800/70 border-slate-700/60 text-slate-100',
+                          ].join(' ')}
+                        >
+                          {m.text}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Input */}
+            <div className="p-2 border-t border-slate-700/60 bg-slate-950/20">
+              {canSend ? (
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    rows={1}
+                    placeholder="输入消息，Enter 发送 / Shift+Enter 换行"
+                    className="flex-1 resize-none bg-slate-900/60 border border-slate-700/60 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-yellow-500/30"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        sendNow();
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={sendNow}
+                    className="px-3 py-2 rounded-xl bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-500/30 text-yellow-200 font-black text-xs"
+                  >
+                    发送
+                  </button>
+                </div>
+              ) : (
+                <div className="text-xs text-slate-500 text-center py-2">仅裁判/队伍可发送消息</div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ==========================================
 // MAIN APP
 // ==========================================
@@ -909,8 +1235,27 @@ export default function App() {
   const [roleFilter, setRoleFilter] = useState<string>('ALL');
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
+
+
+  // CHAT（裁判 / 队伍A / 队伍B 可见）
+  const showChatForUser = userRole === 'REFEREE' || userRole === 'TEAM_A' || userRole === 'TEAM_B';
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMinimized, setChatMinimized] = useState(false);
+  const [chatUnread, setChatUnread] = useState(0);
+  const [chatPos, setChatPos] = useState<FloatingChatPosition>({ x: 16, y: 120 });
+  const [chatSize, setChatSize] = useState<FloatingChatSize>({ w: 360, h: 480 });
+  const chatUiStateRef = useRef<{ open: boolean; minimized: boolean }>({ open: false, minimized: false });
+  const autoChatOpenedRef = useRef<string | null>(null);
+
+  // SIDE SELECTION（开启“地图与BP顺序分离”时需要同时选择 BP 首选队伍）
+  const [pendingSideForA, setPendingSideForA] = useState<Side | null>(null);
+  const [pendingBpFirstTeam, setPendingBpFirstTeam] = useState<TeamId | null>(null);
+
   const lastSeenSeqRef = useRef<number>(0);
-  const reconnectTimerRef = useRef<number | null>(null);
+  const clockOffsetRef = useRef<number>(0); // server_time - client_time (ms)
+  const lastStepEndsAtRef = useRef<number>(0);
+  const [, setMissedActions] = useState<DraftAction[]>([]);
 
   useEffect(() => {
     if (toast) {
@@ -919,36 +1264,239 @@ export default function App() {
     }
   }, [toast]);
 
+
+  // keep ref updated (used for unread in WS handler)
+  useEffect(() => {
+    chatUiStateRef.current = { open: chatOpen, minimized: chatMinimized };
+  }, [chatOpen, chatMinimized]);
+
+  // Load / reset chat cache when room changes
+  useEffect(() => {
+    if (!roomId) {
+      setChatOpen(false);
+      setChatMinimized(false);
+      setChatMessages([]);
+      setChatUnread(0);
+      autoChatOpenedRef.current = null;
+      return;
+    }
+
+    setChatUnread(0);
+
+    const defaultPos: FloatingChatPosition = {
+      x: Math.max(16, window.innerWidth - 380),
+      y: Math.max(100, window.innerHeight - 520),
+    };
+
+    const defaultSize: FloatingChatSize = {
+      w: clamp(360, 280, Math.floor(window.innerWidth * 0.92)),
+      h: clamp(480, 240, Math.floor(window.innerHeight * 0.92)),
+    };
+
+    try {
+      const uiRaw = localStorage.getItem(`lolbp_chat_ui_${roomId}`);
+      if (uiRaw) {
+        const ui = JSON.parse(uiRaw);
+        if (ui?.pos && typeof ui.pos.x === 'number' && typeof ui.pos.y === 'number') setChatPos(ui.pos);
+        else setChatPos(defaultPos);
+
+        if (ui?.size && typeof ui.size.w === 'number' && typeof ui.size.h === 'number') setChatSize(ui.size);
+        else setChatSize(defaultSize);
+
+        if (typeof ui?.minimized === 'boolean') setChatMinimized(ui.minimized);
+        if (typeof ui?.open === 'boolean') setChatOpen(ui.open);
+      } else {
+        setChatPos(defaultPos);
+        setChatSize(defaultSize);
+        setChatMinimized(false);
+        setChatOpen(false);
+      }
+
+      const msgRaw = localStorage.getItem(`lolbp_chat_msgs_${roomId}`);
+      if (msgRaw) {
+        const arr = JSON.parse(msgRaw);
+        if (Array.isArray(arr)) setChatMessages(arr);
+      } else {
+        setChatMessages([]);
+      }
+    } catch {
+      setChatPos(defaultPos);
+      setChatSize(defaultSize);
+      setChatMinimized(false);
+      setChatOpen(false);
+      setChatMessages([]);
+    }
+  }, [roomId]);
+
+  // Auto open once after 选择角色进入房间（每个房间仅自动打开一次）
+  useEffect(() => {
+    if (!roomId) return;
+    if (!showChatForUser) return;
+    if (autoChatOpenedRef.current === roomId) return;
+
+    autoChatOpenedRef.current = roomId;
+    setChatOpen(true);
+    setChatMinimized(false);
+    setChatUnread(0);
+  }, [roomId, showChatForUser]);
+
+  // Persist chat UI
+  useEffect(() => {
+    if (!roomId) return;
+    try {
+      localStorage.setItem(`lolbp_chat_ui_${roomId}`, JSON.stringify({ pos: chatPos, size: chatSize, minimized: chatMinimized, open: chatOpen }));
+    } catch {}
+  }, [roomId, chatPos, chatSize, chatMinimized, chatOpen]);
+
+  // Persist chat messages (client side cache; server is source of truth)
+  useEffect(() => {
+    if (!roomId) return;
+    try {
+      localStorage.setItem(`lolbp_chat_msgs_${roomId}`, JSON.stringify(chatMessages.slice(-300)));
+    } catch {}
+  }, [roomId, chatMessages]);
+
+
+  // 进入 SIDE SELECTION / 切换局数时，重置本地待选项
+  useEffect(() => {
+    if (!state) return;
+
+    const sidesSet = !!(state.sides?.TEAM_A && state.sides?.TEAM_B);
+    const bpSet = !state.separateSideAndBpOrder || !!state.bpFirstTeam;
+
+    if (state.status === 'NOT_STARTED' && (!sidesSet || !bpSet)) {
+      setPendingSideForA(sidesSet ? (state.sides.TEAM_A as Side) : null);
+      setPendingBpFirstTeam(state.bpFirstTeam ?? null);
+    }
+  }, [state]);
+
+
   // WS Connection
   useEffect(() => {
     if (!roomId) return;
-    let closedByEffect = false;
-    lastSeenSeqRef.current = 0;
+
+    let ws: WebSocket | null = null;
+    let alive = true;
+    let retry = 0;
+    let pingTimer: number | null = null;
+    let reconnectTimer: number | null = null;
+
+    const cleanupTimers = () => {
+      if (pingTimer) {
+        window.clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
 
     const connect = () => {
-      const ws = new WebSocket(`${WS_BASE_URL}?room=${encodeURIComponent(roomId)}`);
+      if (!alive) return;
+
+      ws = new WebSocket(`${WS_BASE_URL}?room=${encodeURIComponent(roomId)}`);
       wsRef.current = ws;
 
-      ws.onopen = () => setIsConnected(true);
-      ws.onclose = () => {
-        setIsConnected(false);
-        if (!closedByEffect) {
-          reconnectTimerRef.current = window.setTimeout(connect, 1200);
-        }
+      ws.onopen = () => {
+        setIsConnected(true);
+        retry = 0;
+
+        // 应用层 keepalive，避免长时间无消息导致的 WebSocket 空闲超时断开
+        cleanupTimers();
+        pingTimer = window.setInterval(() => {
+          try {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'PING' }));
+          } catch {}
+        }, 25000);
       };
 
-      ws.onmessage = (event) => {
-        if (closedByEffect) return;
+      ws.onclose = () => {
+        setIsConnected(false);
+        cleanupTimers();
+
+        if (!alive) return;
+
+        const delay = Math.min(10000, 1000 * Math.pow(2, retry));
+        retry = Math.min(retry + 1, 4);
+        reconnectTimer = window.setTimeout(() => connect(), delay);
+      };
+
+      ws.onerror = () => {
+        // 交给 onclose 做重连
+      };
+
+      ws.onmessage = async (event) => {
+        const clientReceivedAt = Date.now();
         try {
           const msg = JSON.parse(event.data);
+
+          // 时钟校准：优先用服务器下发的 timestamp
+          if (typeof msg.timestamp === 'number') {
+            const est = msg.timestamp - clientReceivedAt;
+            clockOffsetRef.current =
+              clockOffsetRef.current === 0 ? est : Math.round(clockOffsetRef.current * 0.8 + est * 0.2);
+          }
+
           if (msg.type === 'STATE_SYNC') {
             const ns = msg.payload as DraftState;
-            const lastSeenSeq = lastSeenSeqRef.current;
-            if (lastSeenSeq > 0 && ns.lastActionSeq > lastSeenSeq + 1) {
-              setToast({ msg: '已恢复最新房间状态', type: 'info' });
+
+            // 没有 timestamp 时，用 stepEndsAt + timeLimit 做一次近似校准（只在 stepEndsAt 变化时触发）
+            if (
+              typeof msg.timestamp !== 'number' &&
+              ns?.stepEndsAt &&
+              ns.stepEndsAt > 0 &&
+              ns.timeLimit > 0 &&
+              ns.stepEndsAt !== lastStepEndsAtRef.current
+            ) {
+              const est = ns.stepEndsAt - clientReceivedAt - ns.timeLimit * 1000;
+              clockOffsetRef.current =
+                clockOffsetRef.current === 0 ? est : Math.round(clockOffsetRef.current * 0.8 + est * 0.2);
+              lastStepEndsAtRef.current = ns.stepEndsAt;
+            } else if (ns?.stepEndsAt !== lastStepEndsAtRef.current) {
+              lastStepEndsAtRef.current = ns?.stepEndsAt || 0;
+            }
+
+            // 补拉丢失的 action（可选）
+            const last = lastSeenSeqRef.current;
+            if (last > 0 && ns.lastActionSeq > last + 1) {
+              setMissedActions([]);
             }
             lastSeenSeqRef.current = ns.lastActionSeq;
+
             setState(ns);
+
+          } else if (msg.type === 'CHAT_SYNC') {
+            const incoming = Array.isArray(msg.payload?.messages) ? (msg.payload.messages as ChatMessage[]) : [];
+            if (incoming.length) {
+              setChatMessages((prev) => {
+                const map = new Map<string, ChatMessage>();
+                [...prev, ...incoming].forEach((m) => {
+                  if (m && typeof m.id === 'string') map.set(m.id, m);
+                });
+                return Array.from(map.values())
+                  .sort((a, b) => a.ts - b.ts)
+                  .slice(-300);
+              });
+            }
+          } else if (msg.type === 'CHAT_MESSAGE') {
+            const cm = msg.payload as ChatMessage;
+            if (cm && typeof cm.id === 'string' && typeof cm.text === 'string') {
+              setChatMessages((prev) => {
+                if (prev.some((p) => p.id === cm.id)) return prev;
+                const next = [...prev, cm].sort((a, b) => a.ts - b.ts);
+                return next.slice(-300);
+              });
+
+              const ui = chatUiStateRef.current;
+              if (!ui.open || ui.minimized) setChatUnread((u) => u + 1);
+            }
+
+          } else if (msg.type === 'CHAT_REJECTED') {
+            setToast({ msg: msg.payload?.reason || '聊天消息发送失败', type: 'error' });
+          } else if (msg.type === 'FORCED_LOGOUT') {
+            setUserRole(null);
+            setToast({ msg: msg.payload?.reason || '该身份已在其他设备登录，当前连接已退出', type: 'error' });
           } else if (msg.type === 'ACTION_REJECTED') {
             setToast({ msg: msg.payload.reason, type: 'error' });
           }
@@ -961,11 +1509,24 @@ export default function App() {
     connect();
 
     return () => {
-      closedByEffect = true;
-      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-      wsRef.current?.close();
+      alive = false;
+      cleanupTimers();
+      try {
+        ws?.close();
+      } catch {}
     };
   }, [roomId]);
+
+  useEffect(() => {
+    if (userRole !== 'REFEREE' && userRole !== 'TEAM_A' && userRole !== 'TEAM_B') return;
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'ROLE_CLAIM',
+      payload: { actorRole: userRole },
+    }));
+  }, [userRole, isConnected]);
+
 
   const send = (type: string, payload: any = {}) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -974,6 +1535,24 @@ export default function App() {
       setToast({ msg: '连接未就绪，正在重连...', type: 'error' });
     }
   };
+
+  const openChat = () => {
+    setChatOpen(true);
+    setChatMinimized(false);
+    setChatUnread(0);
+  };
+
+  const handleChatSend = (text: string) => {
+    if (!showChatForUser) return;
+    const t = (text || '').trim();
+    if (!t) return;
+    if (t.length > 300) {
+      setToast({ msg: '消息过长（最多 300 字）', type: 'error' });
+      return;
+    }
+    send('CHAT_SEND', { text: t });
+  };
+
 
   // Helpers
   const currentStep = useMemo(() => (state ? getCurrentStep(state) : null), [state]);
@@ -1011,24 +1590,64 @@ export default function App() {
       (isReferee || mySide)
   );
 
+  // ✅ 1. 优化：将 fearlessBannedHeroes 提前计算，防止在 event handler 中由于作用域问题取不到
+  const fearlessBannedHeroes = useMemo(() => {
+    const set = new Set<string>();
+    if (state && state.draftMode === 'FEARLESS' && state.seriesHistory) {
+      state.seriesHistory.forEach((game) => {
+        game.bluePicks.forEach((id) => set.add(id));
+        game.redPicks.forEach((id) => set.add(id));
+      });
+    }
+    return set;
+  }, [state]);
+
   // Timer
   useEffect(() => {
-    if (!state || state.status !== 'RUNNING' || state.paused) {
-      if (state?.paused && state.pausedAt) setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
-      else setTimeLeft(0);
+    // 无限制 或没有 stepEndsAt 或非 RUNNING
+    if (!state || state.status !== 'RUNNING' || state.timeLimit === 0 || state.stepEndsAt === 0) {
+      // 暂停时显示暂停瞬间剩余
+      if (state?.paused && state.pausedAt && state.stepEndsAt > 0) {
+        setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
+      } else {
+        setTimeLeft(0);
+      }
       return;
     }
-    const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - Date.now()) / 1000))), 200);
-    return () => clearInterval(i);
+
+    // 暂停：stepEndsAt 与 pausedAt 都是服务器时间戳，直接算
+    if (state.paused) {
+      if (state.pausedAt && state.stepEndsAt > 0) {
+        setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - state.pausedAt) / 1000)));
+      } else {
+        setTimeLeft(0);
+      }
+      return;
+    }
+
+    const tick = () => {
+      // 把本地时间换算到服务器时间，再去减 stepEndsAt
+      const serverNow = Date.now() + clockOffsetRef.current;
+      setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - serverNow) / 1000)));
+    };
+
+    tick();
+    const i = window.setInterval(tick, 200);
+    return () => window.clearInterval(i);
   }, [state]);
+
 
   // Actions
   const handleLock = () => {
     if (!hoveredHeroId || !canInteract) return;
-    send('ACTION_SUBMIT', { heroId: hoveredHeroId });
+
+    // ✅ 2. 优化：如果选择 RANDOM，不再由前端自己算，直接发 SPECIAL_ID_RANDOM 给后端
+    // 这样能保证前后端数据一致性，利用后端的 game.ts 逻辑来处理
+    const heroIdToSend = hoveredHeroId;
+
+    send('ACTION_SUBMIT', { heroId: heroIdToSend });
     setHoveredHeroId(null);
   };
-
 
   const handleSwap = (side: Side, index: number) => {
     if (isSpectator || state?.status !== 'RUNNING' || state?.paused) return;
@@ -1082,8 +1701,37 @@ export default function App() {
     if (wsRef.current) wsRef.current.close();
   };
 
-  const handleSideSelection = (selectedSide: Side) => {
-    send('ACTION_SUBMIT', { type: 'SET_SIDES', sideForA: selectedSide });
+  const handleSideSelection = (selectedSideForA: Side) => {
+    if (!state) return;
+
+    // ✅ 开启分离时：先在本地选中，最后点“确认”提交
+    if (state.separateSideAndBpOrder) {
+      setPendingSideForA(selectedSideForA);
+      return;
+    }
+
+    // 默认逻辑不变：点击立刻提交
+    send('ACTION_SUBMIT', { type: 'SET_SIDES', sideForA: selectedSideForA });
+  };
+
+  const submitSideSelection = () => {
+    if (!state) return;
+
+    if (!pendingSideForA) {
+      setToast({ msg: '请先选择蓝色方', type: 'error' });
+      return;
+    }
+
+    const payload: any = { type: 'SET_SIDES', sideForA: pendingSideForA };
+    if (state.separateSideAndBpOrder) {
+      if (!pendingBpFirstTeam) {
+        setToast({ msg: '请先选择 BP 首选队伍', type: 'error' });
+        return;
+      }
+      payload.bpFirstTeam = pendingBpFirstTeam;
+    }
+
+    send('ACTION_SUBMIT', payload);
   };
 
   const handleReportResult = (winner: TeamId) => send('ACTION_SUBMIT', { type: 'REPORT_RESULT', winner });
@@ -1100,7 +1748,9 @@ export default function App() {
     );
   }
 
-  const bothSidesSet = state.sides.TEAM_A && state.sides.TEAM_B;
+  const bothSidesSet = !!(state.sides.TEAM_A && state.sides.TEAM_B);
+  const bpPrioritySet = !state.separateSideAndBpOrder || !!state.bpFirstTeam;
+  const pregameConfigured = bothSidesSet && bpPrioritySet;
 
   const getTeamData = (teamId: string | null) => {
     if (teamId === 'TEAM_A') return state.teamA;
@@ -1117,15 +1767,6 @@ export default function App() {
   const isBlueUser = userRole === 'REFEREE' || (teamOnBlueId && userRole === teamOnBlueId);
   const isRedUser = userRole === 'REFEREE' || (teamOnRedId && userRole === teamOnRedId);
 
-  // FEARLESS LOGIC
-  const fearlessBannedHeroes = new Set<string>();
-  if (state && state.draftMode === 'FEARLESS' && state.seriesHistory) {
-    state.seriesHistory.forEach((game) => {
-      game.bluePicks.forEach((id) => fearlessBannedHeroes.add(id));
-      game.redPicks.forEach((id) => fearlessBannedHeroes.add(id));
-    });
-  }
-
   return (
     <div className="min-h-screen lg:h-screen bg-slate-950 text-slate-200 font-sans flex flex-col selection:bg-yellow-500/30 relative overflow-y-auto lg:overflow-hidden">
       {/* Ambient background */}
@@ -1141,6 +1782,40 @@ export default function App() {
         </div>
       )}
       {!userRole && <RoleSelectionModal state={state} onSelect={setUserRole} />}
+
+      {showChatForUser && (
+        <FloatingChatWindow
+          open={chatOpen}
+          minimized={chatMinimized}
+          position={chatPos}
+          size={chatSize}
+          unread={chatUnread}
+          messages={chatMessages}
+          teamAName={state?.teamA?.name ?? '队伍A'}
+          teamBName={state?.teamB?.name ?? '队伍B'}
+          selfRole={userRole as UserRole}
+          canSend={showChatForUser}
+          onClose={() => setChatOpen(false)}
+          onToggleMinimize={() =>
+            setChatMinimized((m) => {
+              const next = !m;
+              if (!next) setChatUnread(0);
+              return next;
+            })
+          }
+          onPositionChange={setChatPos}
+          onSizeChange={(s) => {
+            const next = {
+              w: clamp(s.w, 280, Math.floor(window.innerWidth * 0.92)),
+              h: clamp(s.h, 240, Math.floor(window.innerHeight * 0.92)),
+            };
+            setChatSize((prev) => (prev.w === next.w && prev.h === next.h ? prev : next));
+          }}
+          onSend={handleChatSend}
+          onMarkRead={() => setChatUnread(0)}
+        />
+      )}
+
 
       {/* Header */}
       <header className="min-h-20 bg-slate-900/70 backdrop-blur-2xl border-b border-slate-800/70 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between px-4 py-3 lg:px-8 lg:py-0 shadow-lg z-10 relative">
@@ -1193,21 +1868,38 @@ export default function App() {
                     {currentStep.side} {currentStep.type}
                   </span>
                   <span className="text-slate-600">|</span>
-                  <span className="text-slate-100">{timeLeft}s</span>
+                  <span className="text-slate-100">
+                    {state.timeLimit === 0 ? '∞' : `${timeLeft}s`}
+                  </span>
                 </div>
               )
             ) : state.phase === 'SWAP' ? (
               <div className="text-xl font-black flex gap-2 text-yellow-400 animate-pulse">
                 <span>SWAP PHASE</span>
                 <span className="text-slate-600">|</span>
-                <span>{timeLeft}s</span>
+                <span>{state.timeLimit === 0 ? '∞' : `${timeLeft}s`}</span>
               </div>
             ) : null
           )}
         </div>
 
         {/* Right controls */}
-        <div className="flex items-center gap-2 sm:gap-3 w-full lg:w-auto justify-center lg:justify-end flex-wrap">
+        <div className="flex items-center gap-3">
+          {showChatForUser && (
+            <button
+              onClick={openChat}
+              className="flex items-center gap-1 text-xs bg-slate-800/60 hover:bg-slate-700/70 border border-slate-700/60 text-slate-200 px-3 py-1.5 rounded-full font-black transition-all"
+              title="聊天"
+            >
+              <MessageSquare size={14} />
+              <span className="hidden md:inline">聊天</span>
+              {chatUnread > 0 && (
+                <span className="ml-1 text-[10px] font-black px-1.5 py-0.5 rounded-full bg-red-600/90 text-white border border-red-400/30">
+                  {chatUnread > 99 ? '99+' : chatUnread}
+                </span>
+              )}
+            </button>
+          )}
           <div
             className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${
               isConnected ? 'bg-green-950/20 border-green-800/50 text-green-300' : 'bg-slate-900/40 border-slate-700/60 text-slate-400'
@@ -1230,7 +1922,7 @@ export default function App() {
                   <PlayCircle size={16} />
                 </button>
               )}
-              {state.status === 'NOT_STARTED' && bothSidesSet && (
+              {state.status === 'NOT_STARTED' && pregameConfigured && (
                 <button
                   aria-label="Start game"
                   onClick={() => send('ACTION_SUBMIT', { type: 'START_GAME' })}
@@ -1240,7 +1932,15 @@ export default function App() {
                   <Play size={16} />
                 </button>
               )}
-              <button aria-label="Reset match" onClick={() => { if (window.confirm('重置整个系列赛？比分和本房间战报将清空。')) send('ACTION_SUBMIT', { type: 'RESET_GAME' }); }} className="p-2 hover:text-white transition-colors">
+              <button
+                onClick={() => send('ACTION_UNDO')}
+                disabled={state.history.length === 0}
+                className="p-2 hover:text-orange-300 disabled:opacity-30 transition-colors"
+                title="撤销上一步"
+              >
+                <Minus size={16} />
+              </button>
+              <button onClick={() => send('ACTION_SUBMIT', { type: 'RESET_GAME' })} className="p-2 hover:text-white transition-colors">
                 <RotateCcw size={16} />
               </button>
             </div>
@@ -1290,19 +1990,19 @@ export default function App() {
           status={state.status}
           isReady={state.blueReady}
           canControl={isBlueUser}
-          onToggleReady={canInteract || (bothSidesSet && isBlueUser) ? () => send('TOGGLE_READY', { side: 'BLUE' }) : undefined}
+          onToggleReady={canInteract || (pregameConfigured && isBlueUser) ? () => send('TOGGLE_READY', { side: 'BLUE' }) : undefined}
           swapSelection={swapSelection}
           onSwapClick={handleSwap}
           phase={state.phase}
           paused={state.paused}
         />
 
-        <div className="order-1 lg:order-none flex-1 flex flex-col bg-slate-950/20 relative min-h-[620px] lg:min-h-0">
-          {state.status === 'NOT_STARTED' && !bothSidesSet && (
+        <div className="flex-1 flex flex-col bg-slate-950/20 relative">
+          {state.status === 'NOT_STARTED' && !pregameConfigured && (
             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm">
               <div className="bg-slate-900/70 border border-slate-700/60 rounded-3xl p-8 shadow-2xl max-w-3xl w-full mx-6">
                 <div className="text-center">
-                  <h2 className="text-4xl font-black text-white italic mb-4">SIDE SELECTION</h2>
+                  <h2 className="text-4xl font-black text-white italic mb-4">选图选边SIDE SELECTION</h2>
                   <div className="text-slate-400 mb-8 text-lg">
                     {state.nextSideSelector === 'REFEREE' ? 'Referee is setting initial sides' : `${getTeamData(state.nextSideSelector)?.name} is choosing side`}
                   </div>
@@ -1313,20 +2013,82 @@ export default function App() {
                     <div className="text-xl font-black text-blue-300">这一局的蓝色方是：</div>
                     <div className="flex flex-col md:flex-row gap-5 md:gap-10 w-full justify-center">
                       <button onClick={() => handleSideSelection('BLUE')} className="group flex-1">
-                        <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
+                        <div
+                          className={`w-full h-36 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all shadow-xl ${
+                            state.separateSideAndBpOrder
+                              ? pendingSideForA === 'BLUE'
+                                ? 'border-blue-500/90 bg-blue-900/20'
+                                : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                              : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                          }`}
+                        >
                           <span className="text-3xl font-black text-white uppercase">{state.teamA.name}</span>
                           <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
                         </div>
                       </button>
                       <button onClick={() => handleSideSelection('RED')} className="group flex-1">
-                        <div className="w-full h-36 bg-slate-900/60 border-2 border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01] shadow-xl">
+                        <div
+                          className={`w-full h-36 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-2 transition-all shadow-xl ${
+                            state.separateSideAndBpOrder
+                              ? pendingSideForA === 'RED'
+                                ? 'border-blue-500/90 bg-blue-900/20'
+                                : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                              : 'border-slate-700/60 hover:border-blue-500/70 hover:bg-blue-900/15 hover:scale-[1.01]'
+                          }`}
+                        >
                           <span className="text-3xl font-black text-white uppercase">{state.teamB.name}</span>
                           <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
                         </div>
                       </button>
                     </div>
+
+                    {state.separateSideAndBpOrder && (
+                      <>
+                        <div className="h-px w-full bg-slate-700/50 my-2" />
+
+                        <div className="text-xl font-black text-emerald-300">这一局的 BP 首选是：</div>
+                        <div className="flex flex-col md:flex-row gap-5 md:gap-10 w-full justify-center">
+                          <button onClick={() => setPendingBpFirstTeam('TEAM_A')} className="group flex-1">
+                            <div
+                              className={`w-full h-28 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-1 transition-all shadow-xl ${
+                                pendingBpFirstTeam === 'TEAM_A'
+                                  ? 'border-emerald-500/90 bg-emerald-900/15'
+                                  : 'border-slate-700/60 hover:border-emerald-500/70 hover:bg-emerald-900/10 hover:scale-[1.01]'
+                              }`}
+                            >
+                              <span className="text-2xl font-black text-white uppercase">{state.teamA.name}</span>
+                              <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM A</span>
+                            </div>
+                          </button>
+
+                          <button onClick={() => setPendingBpFirstTeam('TEAM_B')} className="group flex-1">
+                            <div
+                              className={`w-full h-28 bg-slate-900/60 border-2 rounded-3xl flex flex-col items-center justify-center gap-1 transition-all shadow-xl ${
+                                pendingBpFirstTeam === 'TEAM_B'
+                                  ? 'border-emerald-500/90 bg-emerald-900/15'
+                                  : 'border-slate-700/60 hover:border-emerald-500/70 hover:bg-emerald-900/10 hover:scale-[1.01]'
+                              }`}
+                            >
+                              <span className="text-2xl font-black text-white uppercase">{state.teamB.name}</span>
+                              <span className="text-[10px] text-slate-500 font-black tracking-widest">TEAM B</span>
+                            </div>
+                          </button>
+                        </div>
+
+                        <button
+                          onClick={submitSideSelection}
+                          disabled={!pendingSideForA || !pendingBpFirstTeam}
+                          className="mt-2 px-12 py-3 rounded-2xl font-black text-white bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 disabled:from-slate-700 disabled:to-slate-700 disabled:opacity-60 transition-all"
+                        >
+                          确认
+                        </button>
+                      </>
+                    )}
+
                     <div className="text-[11px] text-slate-500 text-center">
-                      Tip: Click the team who will be BLUE side.
+                      {state.separateSideAndBpOrder
+                        ? 'Tip: 先选择蓝色方，再选择 BP 首选队伍，然后点击确认。'
+                        : 'Tip: Click the team who will be BLUE side.'}
                     </div>
                   </div>
                 )}
@@ -1447,6 +2209,7 @@ export default function App() {
                             ) : img ? (
                               <>
                                 <img src={img} className="w-full h-full object-cover grayscale opacity-80" />
+                                <div className="absolute inset-0 bg-black/20" />
                                 <Ban className="absolute w-7 h-7 text-red-600 drop-shadow" />
                               </>
                             ) : (
@@ -1488,6 +2251,7 @@ export default function App() {
                             ) : img ? (
                               <>
                                 <img src={img} className="w-full h-full object-cover grayscale opacity-80" />
+                                <div className="absolute inset-0 bg-black/20" />
                                 <Ban className="absolute w-7 h-7 text-red-600 drop-shadow" />
                               </>
                             ) : (
@@ -1578,7 +2342,7 @@ export default function App() {
           status={state.status}
           isReady={state.redReady}
           canControl={isRedUser}
-          onToggleReady={canInteract || (bothSidesSet && isRedUser) ? () => send('TOGGLE_READY', { side: 'RED' }) : undefined}
+          onToggleReady={canInteract || (pregameConfigured && isRedUser) ? () => send('TOGGLE_READY', { side: 'RED' }) : undefined}
           swapSelection={swapSelection}
           onSwapClick={handleSwap}
           phase={state.phase}
@@ -1588,11 +2352,3 @@ export default function App() {
     </div>
   );
 }
-
-/**
- * Optional: Hide scrollbar utilities (Tailwind doesn't ship by default).
- * If you already have these utilities, remove this comment.
- *
- * .no-scrollbar::-webkit-scrollbar { display: none; }
- * .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
- */

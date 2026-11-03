@@ -28,6 +28,10 @@ export default [
         URLSearchParams: 'readonly',
         window: 'readonly',
         WebSocket: 'readonly',
+        HTMLDivElement: 'readonly',
+        ResizeObserver: 'readonly',
+        PointerEvent: 'readonly',
+        localStorage: 'readonly',
       },
     },
     plugins: {
@@ -39,6 +43,7 @@ export default [
       ...tsPlugin.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
       '@typescript-eslint/no-explicit-any': 'off',
+      'no-empty': ['error', { allowEmptyCatch: true }],
       'react-hooks/set-state-in-effect': 'off',
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },

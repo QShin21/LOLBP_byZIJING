@@ -5,7 +5,18 @@
 import { HERO_IDS, HERO_ID_SET } from './heroPool';
 
 export type Side = 'BLUE' | 'RED';
-export type ActionType = 'BAN' | 'PICK' | 'SWAP' | 'FINISH_SWAP' | 'START_GAME' | 'RESET_GAME' | 'TOGGLE_READY' | 'PAUSE_GAME' | 'RESUME_GAME' | 'SET_SIDES' | 'REPORT_RESULT';
+export type ActionType =
+  | 'BAN'
+  | 'PICK'
+  | 'SWAP'
+  | 'FINISH_SWAP'
+  | 'START_GAME'
+  | 'RESET_GAME'
+  | 'TOGGLE_READY'
+  | 'PAUSE_GAME'
+  | 'RESUME_GAME'
+  | 'SET_SIDES'
+  | 'REPORT_RESULT';
 export type DraftPhase = 'DRAFT' | 'SWAP' | 'FINISHED';
 export type DraftStatus = 'NOT_STARTED' | 'RUNNING' | 'FINISHED';
 export type Role = 'TOP' | 'JG' | 'MID' | 'BOT' | 'SUP' | 'SPECIAL';
@@ -13,7 +24,6 @@ export type SeriesMode = 'BO1' | 'BO2' | 'BO3' | 'BO5';
 export type DraftMode = 'STANDARD' | 'FEARLESS';
 export type TeamId = 'TEAM_A' | 'TEAM_B';
 
-export const STEP_DURATION_MS = 30000;
 export const SPECIAL_ID_NONE = 'special_none';
 export const SPECIAL_ID_RANDOM = 'special_random';
 
@@ -46,19 +56,34 @@ export interface GameResultSnapshot {
   redPicks: string[];
 }
 
+// ✅ 新增：聊天消息结构
+export interface ChatMessage {
+  id: string;
+  senderRole: string; // 'REFEREE' | 'TEAM_A' | 'TEAM_B' | 'SPECTATOR'
+  content: string;
+  timestamp: number;
+}
+
 export interface DraftState {
   lastActionSeq: number;
 
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
+  timeLimit: number;
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
   currentGameIdx: number;
   sides: { [key in TeamId]: Side | null };
   nextSideSelector: TeamId | 'REFEREE' | null;
 
+  separateSideAndBpOrder: boolean;
+  bpFirstTeam: TeamId | null;
+
   seriesHistory: GameResultSnapshot[];
+
+  // ✅ 新增：聊天记录
+  chatMessages: ChatMessage[];
 
   status: DraftStatus;
   phase: DraftPhase;
@@ -78,14 +103,26 @@ export interface DraftState {
 }
 
 const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
-  { side: 'BLUE', type: 'BAN' }, { side: 'RED', type: 'BAN' },
-  { side: 'BLUE', type: 'BAN' }, { side: 'RED', type: 'BAN' },
-  { side: 'BLUE', type: 'BAN' }, { side: 'RED', type: 'BAN' },
-  { side: 'BLUE', type: 'PICK' }, { side: 'RED', type: 'PICK' }, { side: 'RED', type: 'PICK' },
-  { side: 'BLUE', type: 'PICK' }, { side: 'BLUE', type: 'PICK' }, { side: 'RED', type: 'PICK' },
-  { side: 'RED', type: 'BAN' }, { side: 'BLUE', type: 'BAN' },
-  { side: 'RED', type: 'BAN' }, { side: 'BLUE', type: 'BAN' },
-  { side: 'RED', type: 'PICK' }, { side: 'BLUE', type: 'PICK' }, { side: 'BLUE', type: 'PICK' }, { side: 'RED', type: 'PICK' },
+  { side: 'BLUE', type: 'BAN' },
+  { side: 'RED', type: 'BAN' },
+  { side: 'BLUE', type: 'BAN' },
+  { side: 'RED', type: 'BAN' },
+  { side: 'BLUE', type: 'BAN' },
+  { side: 'RED', type: 'BAN' },
+  { side: 'BLUE', type: 'PICK' },
+  { side: 'RED', type: 'PICK' },
+  { side: 'RED', type: 'PICK' },
+  { side: 'BLUE', type: 'PICK' },
+  { side: 'BLUE', type: 'PICK' },
+  { side: 'RED', type: 'PICK' },
+  { side: 'RED', type: 'BAN' },
+  { side: 'BLUE', type: 'BAN' },
+  { side: 'RED', type: 'BAN' },
+  { side: 'BLUE', type: 'BAN' },
+  { side: 'RED', type: 'PICK' },
+  { side: 'BLUE', type: 'PICK' },
+  { side: 'BLUE', type: 'PICK' },
+  { side: 'RED', type: 'PICK' },
 ];
 
 export const INITIAL_STATE: DraftState = {
@@ -94,12 +131,19 @@ export const INITIAL_STATE: DraftState = {
   matchTitle: '',
   seriesMode: 'BO1',
   draftMode: 'STANDARD',
+  timeLimit: 30,
   teamA: { name: 'Team A', wins: 0 },
   teamB: { name: 'Team B', wins: 0 },
   currentGameIdx: 1,
   sides: { TEAM_A: null, TEAM_B: null },
   nextSideSelector: 'REFEREE',
+
+  separateSideAndBpOrder: false,
+  bpFirstTeam: null,
   seriesHistory: [],
+
+  // ✅ 初始为空聊天记录
+  chatMessages: [],
 
   status: 'NOT_STARTED',
   phase: 'DRAFT',
@@ -121,13 +165,27 @@ export const createReplayBase = (state: DraftState): DraftState => ({
   matchTitle: state.matchTitle,
   seriesMode: state.seriesMode,
   draftMode: state.draftMode,
+  timeLimit: state.timeLimit,
+  separateSideAndBpOrder: state.separateSideAndBpOrder,
+  chatMessages: [...state.chatMessages],
   teamA: { name: state.teamA.name, wins: 0 },
   teamB: { name: state.teamB.name, wins: 0 },
 });
 
 export const getCurrentStep = (state: DraftState): DraftStep | null => {
   if (state.draftStepIndex >= DRAFT_SEQUENCE.length) return null;
-  return { ...DRAFT_SEQUENCE[state.draftStepIndex], index: state.draftStepIndex };
+  const base = DRAFT_SEQUENCE[state.draftStepIndex];
+
+  const bpFirstSide: Side = (() => {
+    if (!state.separateSideAndBpOrder) return 'BLUE';
+    if (!state.bpFirstTeam) return 'BLUE';
+    const side = state.sides?.[state.bpFirstTeam];
+    return side || 'BLUE';
+  })();
+
+  const resolvedSide: Side = bpFirstSide === 'RED' ? (base.side === 'BLUE' ? 'RED' : 'BLUE') : base.side;
+
+  return { ...base, side: resolvedSide, index: state.draftStepIndex };
 };
 
 const getSideFromRole = (state: DraftState, role: string): Side | null => {
@@ -155,40 +213,44 @@ const getFearlessBannedIds = (state: DraftState): Set<string> => {
   return set;
 };
 
-// --- VALIDATION LOGIC ---
 export const validateMove = (state: DraftState, payload: any): string | null => {
-  if (!payload || typeof payload !== 'object') return "Invalid action payload";
+  if (!payload || typeof payload !== 'object') return 'Invalid action payload';
   const { actorRole, type, side, heroId } = payload;
 
-  if (!actorRole) return "Unauthorized: No role specified";
-  if (actorRole === 'SPECTATOR') return "Spectators cannot perform actions";
-  if (!['REFEREE', 'TEAM_A', 'TEAM_B'].includes(actorRole)) return "Unknown role";
+  if (!actorRole) return 'Unauthorized: No role specified';
+  if (actorRole === 'SPECTATOR') return 'Spectators cannot perform actions';
+  if (!['REFEREE', 'TEAM_A', 'TEAM_B'].includes(actorRole)) return 'Unknown role';
 
   if (['START_GAME', 'RESET_GAME', 'PAUSE_GAME', 'RESUME_GAME', 'REPORT_RESULT'].includes(type)) {
-      if (actorRole !== 'REFEREE') return "Only Referee can manage game state";
-      if (type === 'PAUSE_GAME' && (state.status !== 'RUNNING' || state.paused)) return "Game cannot be paused";
-      if (type === 'RESUME_GAME' && (state.status !== 'RUNNING' || !state.paused)) return "Game is not paused";
-      if (type === 'START_GAME') {
-        if (state.status !== 'NOT_STARTED') return "Game already started";
-        if (!state.sides.TEAM_A || !state.sides.TEAM_B) return "Sides not selected yet";
-        if (!state.blueReady || !state.redReady) return "Both teams must be READY to start";
-      }
-      if (type === 'REPORT_RESULT') {
-        if (state.status !== 'FINISHED') return "Draft is not finished yet";
-        if (!isTeamId(payload.winner)) return "Invalid winner";
-        if (state.seriesHistory?.some((game) => game.gameIdx === state.currentGameIdx)) {
-          return "This game result has already been reported";
-        }
-      }
-      return null;
+    if (actorRole !== 'REFEREE') return 'Only Referee can manage game state';
+    if (type === 'START_GAME' && state.status !== 'NOT_STARTED') return 'Game already started';
+    if (type === 'PAUSE_GAME' && (state.status !== 'RUNNING' || state.paused)) return 'Game cannot be paused';
+    if (type === 'RESUME_GAME' && (state.status !== 'RUNNING' || !state.paused)) return 'Game is not paused';
+    if (type === 'REPORT_RESULT') {
+      if (state.status !== 'FINISHED') return 'Draft is not finished yet';
+      if (!isTeamId(payload.winner)) return 'Invalid winner';
+      if (state.seriesHistory.some(g => g.gameIdx === state.currentGameIdx)) return 'This game result has already been reported';
+    }
+    if (type === 'START_GAME') {
+      if (!state.sides.TEAM_A || !state.sides.TEAM_B) return 'Sides not selected yet';
+      if (state.separateSideAndBpOrder && !state.bpFirstTeam) return 'BP priority not selected yet';
+      if (!state.blueReady || !state.redReady) return 'Both teams must be READY to start';
+    }
+    return null;
   }
 
   if (type === 'SET_SIDES') {
-    if (state.status !== 'NOT_STARTED') return "Cannot set sides after game started";
-    if (!isSide(payload.sideForA)) return "Invalid side selection";
+    if (!isSide(payload.sideForA)) return 'Invalid side selection';
+    if (state.status !== 'NOT_STARTED') return 'Cannot set sides after game started';
     const selector = state.nextSideSelector || 'REFEREE';
     if (actorRole !== selector && actorRole !== 'REFEREE') {
-       return `Waiting for ${selector} to select sides`;
+      return `Waiting for ${selector} to select sides`;
+    }
+    if (state.separateSideAndBpOrder) {
+      const bpFirstTeam = payload.bpFirstTeam as TeamId | undefined;
+      if (bpFirstTeam !== 'TEAM_A' && bpFirstTeam !== 'TEAM_B') {
+        return 'BP priority not selected yet';
+      }
     }
     return null;
   }
@@ -235,14 +297,13 @@ export const validateMove = (state: DraftState, payload: any): string | null => 
       if (heroId !== SPECIAL_ID_RANDOM && usedHeroes.has(heroId)) return "Hero already used";
     }
 
-    // Fearless Check
     if (heroId && state.draftMode === 'FEARLESS') {
-       if (heroId !== SPECIAL_ID_NONE && heroId !== SPECIAL_ID_RANDOM) {
-         const fearlessBans = getFearlessBannedIds(state);
-         if (fearlessBans.has(heroId)) {
-           return "Hero unavailable in Global Fearless mode (picked in previous game)";
-         }
-       }
+      if (heroId !== SPECIAL_ID_NONE && heroId !== SPECIAL_ID_RANDOM) {
+        const fearlessBans = getFearlessBannedIds(state);
+        if (fearlessBans.has(heroId)) {
+          return 'Hero unavailable in Global Fearless mode (picked in previous game)';
+        }
+      }
     }
 
     return null;
@@ -265,7 +326,7 @@ export const validateMove = (state: DraftState, payload: any): string | null => 
     }
   }
 
-  return "Invalid action";
+  return 'Invalid action';
 };
 
 const reduceState = (state: DraftState, action: DraftAction): DraftState => {
@@ -283,6 +344,12 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
       const sideA = action.payload.sideForA as Side;
       const sideB = sideA === 'BLUE' ? 'RED' : 'BLUE';
       newState.sides = { TEAM_A: sideA, TEAM_B: sideB };
+      if (newState.separateSideAndBpOrder) {
+        const bp = action.payload.bpFirstTeam as TeamId | undefined;
+        newState.bpFirstTeam = bp === 'TEAM_A' || bp === 'TEAM_B' ? bp : null;
+      } else {
+        newState.bpFirstTeam = null;
+      }
       newState.blueReady = false;
       newState.redReady = false;
       break;
@@ -329,10 +396,14 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
         newState.phase = 'DRAFT';
         newState.draftStepIndex = 0;
         newState.stepIndex = 0;
-        newState.blueBans = []; newState.redBans = [];
-        newState.bluePicks = []; newState.redPicks = [];
-        newState.blueReady = false; newState.redReady = false;
+        newState.blueBans = [];
+        newState.redBans = [];
+        newState.bluePicks = [];
+        newState.redPicks = [];
+        newState.blueReady = false;
+        newState.redReady = false;
         newState.stepEndsAt = 0;
+        newState.bpFirstTeam = null;
 
         const loser = winner === 'TEAM_A' ? 'TEAM_B' : 'TEAM_A';
         newState.nextSideSelector = loser;
@@ -348,9 +419,14 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
         matchTitle: state.matchTitle,
         seriesMode: state.seriesMode,
         draftMode: state.draftMode,
+        timeLimit: state.timeLimit,
+        separateSideAndBpOrder: state.separateSideAndBpOrder,
+        bpFirstTeam: null,
         teamA: { ...state.teamA, wins: 0 },
         teamB: { ...state.teamB, wins: 0 },
-        lastActionSeq: action.seq
+        lastActionSeq: action.seq,
+        // ✅ 保持聊天记录
+        chatMessages: state.chatMessages,
       };
 
     case 'PAUSE_GAME':
@@ -396,108 +472,125 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
 
   newState.stepIndex = action.stepIndex + 1;
   return newState;
-}
+};
 
 export const applyAction = (state: DraftState, payload: any, now: number): DraftState => {
   let action: DraftAction | null = null;
   const nextSeq = state.lastActionSeq + 1;
 
   if (['START_GAME', 'RESET_GAME', 'TOGGLE_READY', 'PAUSE_GAME', 'RESUME_GAME', 'SET_SIDES', 'REPORT_RESULT'].includes(payload.type)) {
-      action = {
-        seq: nextSeq,
-        stepIndex: state.stepIndex,
-        type: payload.type,
-        actorRole: payload.actorRole,
-        side: payload.side,
-        reason: payload.reason,
-        payload: payload
-      };
-  }
-  else if (state.status === 'RUNNING' && !state.paused) {
-      const currentStep = getCurrentStep(state);
+    action = {
+      seq: nextSeq,
+      stepIndex: state.stepIndex,
+      type: payload.type,
+      actorRole: payload.actorRole,
+      side: payload.side,
+      reason: payload.reason,
+      payload: payload,
+    };
+  } else if (state.status === 'RUNNING' && !state.paused) {
+    const currentStep = getCurrentStep(state);
 
-      if (state.phase === 'DRAFT') {
-        if (currentStep) {
-            let resolvedHeroId = payload.heroId;
-            if (resolvedHeroId === SPECIAL_ID_RANDOM) {
-                const usedHeroes = getUsedHeroIds(state);
-                // Fearless Random Logic
-                const fearlessBans = getFearlessBannedIds(state);
+    if (state.phase === 'DRAFT') {
+      if (currentStep) {
+        let resolvedHeroId = payload.heroId;
+        if (resolvedHeroId === SPECIAL_ID_RANDOM) {
+          const usedHeroes = new Set([...state.blueBans, ...state.redBans, ...state.bluePicks, ...state.redPicks]);
+          const fearlessBans = getFearlessBannedIds(state);
 
-                const available = HERO_IDS.filter(id => !usedHeroes.has(id) && !fearlessBans.has(id));
-                if (available.length > 0) {
-                  const randomIndex = Math.floor(Math.random() * available.length);
-                  resolvedHeroId = available[randomIndex];
-                } else {
-                  resolvedHeroId = SPECIAL_ID_NONE;
-                }
-            }
-            action = {
-              seq: nextSeq,
-              stepIndex: state.stepIndex,
-              heroId: resolvedHeroId,
-              side: currentStep.side,
-              type: currentStep.type,
-              actorRole: payload.actorRole
-            };
+          const available = HERO_IDS.filter((id) => !usedHeroes.has(id) && !fearlessBans.has(id));
+          if (available.length > 0) {
+            const randomIndex = Math.floor(Math.random() * available.length);
+            resolvedHeroId = available[randomIndex];
+          } else {
+            resolvedHeroId = SPECIAL_ID_NONE;
+          }
         }
-      } else if (state.phase === 'SWAP') {
-        if (payload.type === 'SWAP') {
-          action = {
-            seq: nextSeq,
-            stepIndex: state.stepIndex,
-            type: 'SWAP',
-            side: payload.side,
-            swapData: payload.swapData,
-            actorRole: payload.actorRole
-          };
-        } else if (payload.type === 'FINISH_SWAP') {
-          action = { seq: nextSeq, stepIndex: state.stepIndex, type: 'FINISH_SWAP', actorRole: payload.actorRole }
-        }
+        action = {
+          seq: nextSeq,
+          stepIndex: state.stepIndex,
+          heroId: resolvedHeroId,
+          side: currentStep.side,
+          type: currentStep.type,
+          actorRole: payload.actorRole,
+        };
       }
+    } else if (state.phase === 'SWAP') {
+      if (payload.type === 'SWAP') {
+        action = {
+          seq: nextSeq,
+          stepIndex: state.stepIndex,
+          type: 'SWAP',
+          side: payload.side,
+          swapData: payload.swapData,
+          actorRole: payload.actorRole,
+        };
+      } else if (payload.type === 'FINISH_SWAP') {
+        action = { seq: nextSeq, stepIndex: state.stepIndex, type: 'FINISH_SWAP', actorRole: payload.actorRole };
+      }
+    }
   }
 
   if (!action) return state;
 
   const newState = reduceState(state, action);
 
+  const duration = (state.timeLimit || 0) * 1000;
+
   if (action.type === 'PAUSE_GAME') {
-      if (!state.paused) newState.pausedAt = now;
-      else newState.pausedAt = state.pausedAt;
+    if (!state.paused) newState.pausedAt = now;
+    else newState.pausedAt = state.pausedAt;
   } else if (action.type === 'RESUME_GAME') {
-      if (state.pausedAt) {
-          newState.stepEndsAt = state.stepEndsAt + (now - state.pausedAt);
-          newState.pausedAt = undefined;
-      }
+    if (state.pausedAt) {
+      newState.stepEndsAt = state.stepEndsAt + (now - state.pausedAt);
+      newState.pausedAt = undefined;
+    }
   } else if (newState.status === 'RUNNING' && newState.phase !== 'FINISHED' && !newState.paused) {
-      if (action.type === 'START_GAME') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
-      } else if (state.phase === 'DRAFT' && newState.phase === 'SWAP') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
-      } else if (newState.phase === 'DRAFT') {
-          newState.stepEndsAt = now + STEP_DURATION_MS;
-      } else {
-        // Swap 阶段内部动作不重置时间
-        newState.stepEndsAt = state.stepEndsAt;
-      }
+    const shouldResetTimer =
+      action.type === 'START_GAME' ||
+      (state.phase === 'DRAFT' && newState.phase === 'DRAFT') ||
+      (state.phase === 'DRAFT' && newState.phase === 'SWAP');
+
+    if (shouldResetTimer) {
+      newState.stepEndsAt = duration > 0 ? now + duration : 0;
+    } else {
+      newState.stepEndsAt = state.stepEndsAt;
+    }
   } else if (newState.phase === 'FINISHED') {
-      newState.stepEndsAt = 0;
+    newState.stepEndsAt = 0;
   }
 
   newState.history = [...state.history, action];
   return newState;
 };
 
-export const replay = (history: DraftAction[], now: number, baseState: DraftState = INITIAL_STATE): DraftState => {
-    let state = createReplayBase(baseState);
-    for (const action of history) {
-        state = reduceState(state, action);
-    }
-    state.history = history;
-    if (state.status === 'RUNNING' && state.phase !== 'FINISHED' && !state.paused) {
-        state.stepEndsAt = now + STEP_DURATION_MS;
-    } else {
-        state.stepEndsAt = 0;
-    }
-    return state;
-}
+export const replay = (history: DraftAction[], now: number, seedConfig?: DraftState | null): DraftState => {
+  const base: DraftState = {
+    ...INITIAL_STATE,
+    matchTitle: seedConfig?.matchTitle ?? INITIAL_STATE.matchTitle,
+    seriesMode: seedConfig?.seriesMode ?? INITIAL_STATE.seriesMode,
+    draftMode: seedConfig?.draftMode ?? INITIAL_STATE.draftMode,
+    timeLimit: seedConfig?.timeLimit ?? INITIAL_STATE.timeLimit,
+    separateSideAndBpOrder: seedConfig?.separateSideAndBpOrder ?? INITIAL_STATE.separateSideAndBpOrder,
+    bpFirstTeam: null,
+    teamA: { name: seedConfig?.teamA?.name ?? INITIAL_STATE.teamA.name, wins: 0 },
+    teamB: { name: seedConfig?.teamB?.name ?? INITIAL_STATE.teamB.name, wins: 0 },
+    // ✅ Undo/Replay 时保留聊天记录
+    chatMessages: seedConfig?.chatMessages ?? INITIAL_STATE.chatMessages,
+  };
+
+  let state = { ...base };
+  for (const action of history) {
+    state = reduceState(state, action);
+  }
+  state.history = history;
+
+  const duration = (state.timeLimit || 0) * 1000;
+
+  if (state.status === 'RUNNING' && state.phase !== 'FINISHED' && !state.paused) {
+    state.stepEndsAt = duration > 0 ? now + duration : 0;
+  } else {
+    state.stepEndsAt = 0;
+  }
+  return state;
+};

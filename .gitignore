@@ -9,5 +9,6 @@ apps/server/data/
 
 npm-debug.log*
 dev-server.log
+server-verification.log
 verification-output/
 *.local

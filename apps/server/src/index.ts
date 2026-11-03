@@ -5,12 +5,11 @@ import {
   DraftState,
   INITIAL_STATE,
   applyAction,
-  createReplayBase,
   validateMove,
   replay,
-  SPECIAL_ID_RANDOM,
+  SPECIAL_ID_RANDOM
 } from './game';
-import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions, replaceRoomActionsAndState } from './db';
+import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions, getRoomChat, appendRoomChatMessage, removeLastAction, ChatMessage } from './db';
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -21,8 +20,24 @@ interface Room {
   id: string;
   state: DraftState;
   clients: Set<WebSocket>;
+  roleSessions: Map<'REFEREE' | 'TEAM_A' | 'TEAM_B', WebSocket>;
   lastActivity: number;
+  chat: ChatMessage[];
 }
+
+const appendAndBroadcastChatMessage = (room: Room, roomId: string, message: ChatMessage) => {
+  room.chat.push(message);
+  if (room.chat.length > 200) room.chat = room.chat.slice(-200);
+
+  try {
+    appendRoomChatMessage(roomId, message, 200);
+  } catch {}
+
+  const out = JSON.stringify({ type: 'CHAT_MESSAGE', payload: message, timestamp: Date.now() });
+  room.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) client.send(out);
+  });
+};
 
 const rooms = new Map<string, Room>();
 
@@ -37,6 +52,8 @@ const cleanText = (value: unknown, fallback: string, maxLength = 40): string => 
 };
 
 const normalizeInitialConfig = (config: any = {}) => ({
+  timeLimit: [0, 30, 60, 90].includes(config.timeLimit) ? config.timeLimit : 30,
+  separateSideAndBpOrder: config.separateSideAndBpOrder === true,
   matchTitle: cleanText(config.matchTitle, 'Exhibition Match', 80),
   seriesMode: SERIES_MODES.has(config.seriesMode) ? config.seriesMode : 'BO1',
   draftMode: DRAFT_MODES.has(config.draftMode) ? config.draftMode : 'STANDARD',
@@ -52,23 +69,21 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
 
     if (persistedState) {
       console.log(`Restored room from Disk: ${roomId}`);
-
-      // FIX: 深度防御性合并。防止旧数据缺少字段导致前端白屏。
       const safeState: DraftState = {
         ...INITIAL_STATE,
         ...persistedState,
-
         teamA: persistedState.teamA || { name: 'Team A', wins: 0 },
         teamB: persistedState.teamB || { name: 'Team B', wins: 0 },
         sides: persistedState.sides || { TEAM_A: null, TEAM_B: null },
         seriesHistory: Array.isArray(persistedState.seriesHistory) ? persistedState.seriesHistory : [],
-
+        timeLimit: persistedState.timeLimit !== undefined ? persistedState.timeLimit : 30,
+        separateSideAndBpOrder: persistedState.separateSideAndBpOrder !== undefined ? persistedState.separateSideAndBpOrder : false,
+        bpFirstTeam: persistedState.bpFirstTeam !== undefined ? persistedState.bpFirstTeam : null,
         matchTitle: persistedState.matchTitle || '',
         seriesMode: persistedState.seriesMode || 'BO1',
         draftMode: persistedState.draftMode || 'STANDARD',
         status: persistedState.status || 'NOT_STARTED',
         phase: persistedState.phase || 'DRAFT',
-
         blueBans: persistedState.blueBans || [],
         redBans: persistedState.redBans || [],
         bluePicks: persistedState.bluePicks || [],
@@ -76,22 +91,15 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         history: persistedState.history || []
       };
 
-      // -----------------------------------------------------------
-      // FIX: 关键修复 - 状态清洗 (State Sanitization)
-      // 如果状态是 NOT_STARTED，强制重置 BP 进度，防止脏数据导致 Step 溢出
-      // -----------------------------------------------------------
       if (safeState.status === 'NOT_STARTED') {
         safeState.draftStepIndex = 0;
-        safeState.stepIndex = 0; // 重置动作步数
+        safeState.stepIndex = 0;
         safeState.blueBans = [];
         safeState.redBans = [];
         safeState.bluePicks = [];
         safeState.redPicks = [];
         safeState.stepEndsAt = 0;
-        // 注意：不要重置 sides，因为选边可能在 NOT_STARTED 阶段已完成
       }
-
-      // 确保 sides 对象结构完整
       if (!safeState.sides) safeState.sides = { TEAM_A: null, TEAM_B: null };
       if (safeState.sides.TEAM_A === undefined) safeState.sides.TEAM_A = null;
       if (safeState.sides.TEAM_B === undefined) safeState.sides.TEAM_B = null;
@@ -100,7 +108,9 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         id: roomId,
         state: safeState,
         clients: new Set(),
-        lastActivity: Date.now()
+        roleSessions: new Map(),
+        lastActivity: Date.now(),
+        chat: getRoomChat(roomId)
       };
 
       // 将清洗后的干净状态写回磁盘
@@ -117,20 +127,23 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         paused: false,
         stepEndsAt: 0,
         lastActionSeq: 0,
-
-        matchTitle: config.matchTitle,
-        seriesMode: config.seriesMode,
-        draftMode: config.draftMode,
-        teamA: { name: config.teamA, wins: 0 },
-        teamB: { name: config.teamB, wins: 0 },
+        matchTitle: initialConfig?.matchTitle || 'Exhibition Match',
+        seriesMode: initialConfig?.seriesMode || 'BO1',
+        draftMode: initialConfig?.draftMode || 'STANDARD',
+        timeLimit: initialConfig?.timeLimit !== undefined ? initialConfig.timeLimit : 30,
+        separateSideAndBpOrder: initialConfig?.separateSideAndBpOrder !== undefined ? initialConfig.separateSideAndBpOrder : false,
+        bpFirstTeam: null,
+        teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
+        teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
         sides: { TEAM_A: null, TEAM_B: null },
       };
-
       room = {
         id: roomId,
         state: initialState,
         clients: new Set(),
-        lastActivity: Date.now()
+        roleSessions: new Map(),
+        lastActivity: Date.now(),
+        chat: []
       };
       saveRoomState(roomId, initialState);
     }
@@ -140,9 +153,11 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
 };
 
 const broadcastToRoom = (room: Room) => {
+  // ✅ 修复：附带服务器当前时间戳，用于客户端校准
   const message = JSON.stringify({
     type: 'STATE_SYNC',
-    payload: room.state
+    payload: room.state,
+    timestamp: Date.now()
   });
 
   room.clients.forEach(client => {
@@ -188,7 +203,6 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // API: Get missing actions
   if (req.method === 'GET' && url.pathname?.match(/^\/rooms\/[a-zA-Z0-9]+\/actions$/)) {
     const roomId = normalizeRoomId(url.pathname.split('/')[2]);
     if (!roomId) {
@@ -217,15 +231,91 @@ wss.on('connection', (ws, req) => {
     return;
   }
   const room = getOrCreateRoom(roomId);
+  let claimedRole: 'REFEREE' | 'TEAM_A' | 'TEAM_B' | null = null;
 
   room.clients.add(ws);
 
-  ws.send(JSON.stringify({ type: 'STATE_SYNC', payload: room.state }));
+  // ✅ 修复：连接时也发送带时间戳的同步包
+  ws.send(JSON.stringify({
+    type: 'STATE_SYNC',
+    payload: room.state,
+    timestamp: Date.now()
+  }));
+
+  // Chat history sync
+  ws.send(JSON.stringify({
+    type: 'CHAT_SYNC',
+    payload: { messages: room.chat },
+    timestamp: Date.now()
+  }));
 
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
       room.lastActivity = Date.now();
+
+      // keepalive
+      if (data.type === 'PING') {
+        try {
+          ws.send(JSON.stringify({ type: 'PONG', timestamp: Date.now() }));
+        } catch {}
+        return;
+      }
+
+      if (data.type === 'ROLE_CLAIM') {
+        const role = (data.payload?.actorRole || '').toString();
+        const allowed = role === 'REFEREE' || role === 'TEAM_A' || role === 'TEAM_B';
+        if (!allowed) return;
+
+        const typedRole = role as 'REFEREE' | 'TEAM_A' | 'TEAM_B';
+        const existingClient = room.roleSessions.get(typedRole);
+
+        if (existingClient && existingClient !== ws && existingClient.readyState === WebSocket.OPEN) {
+          existingClient.send(JSON.stringify({
+            type: 'FORCED_LOGOUT',
+            payload: { reason: `该身份已在其他设备登录：${typedRole}` },
+            timestamp: Date.now()
+          }));
+          existingClient.close(4001, 'Logged in on another device');
+        }
+
+        room.roleSessions.set(typedRole, ws);
+        claimedRole = typedRole;
+
+        const joinRecord: ChatMessage = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          ts: Date.now(),
+          role: 'SYSTEM',
+          text: `${typedRole} 进入了房间`
+        };
+        appendAndBroadcastChatMessage(room, roomId, joinRecord);
+        return;
+      }
+
+      // Chat relay (裁判 / TEAM_A / TEAM_B)
+      if (data.type === 'CHAT_SEND') {
+        const text = (data.payload?.text || '').toString().trim();
+        const role = (data.payload?.actorRole || '').toString();
+
+        const allowed = role === 'REFEREE' || role === 'TEAM_A' || role === 'TEAM_B';
+        if (!allowed) return;
+        if (!text) return;
+        if (text.length > 300) {
+          ws.send(JSON.stringify({ type: 'CHAT_REJECTED', payload: { reason: 'Message too long (max 300 chars)' } }));
+          return;
+        }
+
+        const chatMsg: ChatMessage = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          ts: Date.now(),
+          role,
+          text
+        };
+
+        appendAndBroadcastChatMessage(room, roomId, chatMsg);
+
+        return;
+      }
 
       if (data.type === 'ACTION_SUBMIT' || data.type === 'TOGGLE_READY') {
         const payload = data.type === 'TOGGLE_READY'
@@ -255,25 +345,24 @@ wss.on('connection', (ws, req) => {
           return;
         }
         if (room.state.history.length > 0) {
-           const newHistory = room.state.history.slice(0, -1);
-           const newState = replay(newHistory, Date.now(), createReplayBase(room.state));
-           replaceRoomActionsAndState(roomId, newHistory, newState);
-           room.state = newState;
-           broadcastToRoom(room);
+          removeLastAction(roomId);
+          const newHistory = room.state.history.slice(0, -1);
+          const newState = replay(newHistory, Date.now(), room.state);
+          saveRoomState(roomId, newState);
+          room.state = newState;
+          broadcastToRoom(room);
         }
       }
 
       if (data.type === 'ACTION_RESET') {
-          if (data.payload?.actorRole !== 'REFEREE') {
-            ws.send(JSON.stringify({ type: 'ACTION_REJECTED', payload: { reason: 'Only Referee can reset' } }));
-            return;
-          }
-          const newState = applyAction(room.state, { type: 'RESET_GAME', actorRole: 'REFEREE' }, Date.now());
-          const newAction = newState.history[newState.history.length - 1];
-          if (newAction) saveActionAndUpdateState(roomId, newAction, newState);
-          else saveRoomState(roomId, newState);
-          room.state = newState;
-          broadcastToRoom(room);
+        if (data.payload?.actorRole !== 'REFEREE') {
+          ws.send(JSON.stringify({ type: 'ACTION_REJECTED', payload: { reason: 'Only Referee can reset' } }));
+          return;
+        }
+        const newState = applyAction(room.state, { type: 'RESET_GAME', actorRole: 'REFEREE' }, Date.now());
+        saveRoomState(roomId, newState);
+        room.state = newState;
+        broadcastToRoom(room);
       }
 
     } catch (e) {
@@ -283,6 +372,9 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     room.clients.delete(ws);
+    if (claimedRole && room.roleSessions.get(claimedRole) === ws) {
+      room.roleSessions.delete(claimedRole);
+    }
   });
 });
 
@@ -292,7 +384,10 @@ setInterval(() => {
     if (room.state.paused) return;
     if (room.state.status !== 'RUNNING') return;
 
-    if (now > room.state.stepEndsAt && room.state.stepEndsAt > 0) {
+    // 只有当 stepEndsAt > 0 时才检查超时 (0 代表无上限)
+    if (room.state.stepEndsAt > 0 && now > room.state.stepEndsAt) {
+      console.log(`[Room ${room.id}] Timeout triggered. Auto-picking...`);
+
       let newState = room.state;
       if (room.state.phase === 'DRAFT') {
         newState = applyAction(room.state, { heroId: SPECIAL_ID_RANDOM, actorRole: 'REFEREE' }, now);

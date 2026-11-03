@@ -8,9 +8,19 @@ const ROOMS_DIR = path.join(DATA_DIR, 'rooms');
 const ACTIONS_DIR = path.join(DATA_DIR, 'actions');
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
+const CHATS_DIR = path.join(DATA_DIR, 'chats');
+
 // 确保目录存在
 if (!fs.existsSync(ROOMS_DIR)) fs.mkdirSync(ROOMS_DIR, { recursive: true });
 if (!fs.existsSync(ACTIONS_DIR)) fs.mkdirSync(ACTIONS_DIR, { recursive: true });
+if (!fs.existsSync(CHATS_DIR)) fs.mkdirSync(CHATS_DIR, { recursive: true });
+
+export interface ChatMessage {
+  id: string;
+  ts: number; // ms
+  role: string; // REFEREE / TEAM_A / TEAM_B / ...
+  text: string;
+}
 
 const safeRoomId = (roomId: string): string => {
   const normalized = roomId.trim();
@@ -64,9 +74,22 @@ export const saveActionAndUpdateState = (roomId: string, action: DraftAction, ne
   saveRoomState(roomId, newState);
 };
 
-export const replaceRoomActionsAndState = (roomId: string, actions: DraftAction[], newState: DraftState) => {
-  fs.writeFileSync(roomActionsPath(roomId), JSON.stringify(actions, null, 2));
-  saveRoomState(roomId, newState);
+// 删除最后一条 Action（用于撤销）
+export const removeLastAction = (roomId: string): DraftAction[] => {
+  const actionFile = path.join(ACTIONS_DIR, `${roomId}.json`);
+  if (!fs.existsSync(actionFile)) return [];
+
+  try {
+    const actions: DraftAction[] = JSON.parse(fs.readFileSync(actionFile, 'utf-8'));
+    if (!Array.isArray(actions) || actions.length === 0) return [];
+
+    const trimmed = actions.slice(0, -1);
+    fs.writeFileSync(actionFile, JSON.stringify(trimmed, null, 2));
+    return trimmed;
+  } catch (e) {
+    console.error('Error trimming actions file', e);
+    return [];
+  }
 };
 
 // 获取历史 Actions
@@ -75,8 +98,37 @@ export const getRoomActions = (roomId: string, afterSeq: number = 0): DraftActio
     const actionFile = roomActionsPath(roomId);
     if (!fs.existsSync(actionFile)) return [];
     const actions: DraftAction[] = JSON.parse(fs.readFileSync(actionFile, 'utf-8'));
-    return actions.filter(a => a.seq > afterSeq);
+    return actions.filter((a) => a.seq > afterSeq);
   } catch (e) {
     return [];
   }
+};
+
+// =====================
+// Chat persistence
+// =====================
+
+export const getRoomChat = (roomId: string): ChatMessage[] => {
+  const chatFile = path.join(CHATS_DIR, `${roomId}.json`);
+  if (!fs.existsSync(chatFile)) return [];
+  try {
+    const raw = fs.readFileSync(chatFile, 'utf-8');
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? (arr as ChatMessage[]).filter((m) => m && typeof m.id === 'string') : [];
+  } catch (e) {
+    return [];
+  }
+};
+
+export const saveRoomChat = (roomId: string, messages: ChatMessage[]) => {
+  const chatFile = path.join(CHATS_DIR, `${roomId}.json`);
+  fs.writeFileSync(chatFile, JSON.stringify(messages, null, 2));
+};
+
+export const appendRoomChatMessage = (roomId: string, message: ChatMessage, maxMessages: number = 200) => {
+  const messages = getRoomChat(roomId);
+  messages.push(message);
+  const trimmed = messages.slice(-maxMessages);
+  saveRoomChat(roomId, trimmed);
+  return trimmed;
 };

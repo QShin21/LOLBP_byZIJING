@@ -18,6 +18,7 @@ import {
   Wifi,
   WifiOff,
   Search,
+  Copy,
 } from 'lucide-react';
 
 // ✅ 从 data/heroes.ts 导入（该文件由脚本生成，包含 nameCn / titleCn）
@@ -48,9 +49,24 @@ type SeriesMode = 'BO1' | 'BO2' | 'BO3' | 'BO5';
 type DraftMode = 'STANDARD' | 'FEARLESS';
 type TeamId = 'TEAM_A' | 'TEAM_B';
 type UserRole = 'REFEREE' | 'SPECTATOR' | TeamId;
+type LobbyConfig = {
+  matchTitle: string;
+  teamA: string;
+  teamB: string;
+  seriesMode: SeriesMode;
+  draftMode: DraftMode;
+};
 
 const SPECIAL_ID_NONE = 'special_none';
 const SPECIAL_ID_RANDOM = 'special_random';
+const SERIES_MODE_OPTIONS: SeriesMode[] = ['BO1', 'BO2', 'BO3', 'BO5'];
+const trimTrailingSlash = (value: string) => value.replace(/\/+$/, '');
+const API_BASE_URL = trimTrailingSlash(
+  import.meta.env.VITE_API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:8080`
+);
+const WS_BASE_URL = trimTrailingSlash(
+  import.meta.env.VITE_WS_URL || API_BASE_URL.replace(/^http/, 'ws')
+);
 
 // ✅ App 内使用的 Hero 类型：包含脚本生成的中英文信息，并把 roles 收窄到 Role[]
 type Hero = Omit<DataHero, 'roles'> & { roles: Role[] };
@@ -179,7 +195,8 @@ const _norm = (s: string) =>
   (s || '')
     .toLowerCase()
     .replace(/\s+/g, '')
-    .replace(/[·'’"“”、,，.。!！?？:：;；()（）\[\]{}<>《》\-_/\\|&]/g, '');
+    .replace(/[·'’"“”、,，.。!！?？:：;；()（）{}<>《》_/\\|&-]/g, '')
+    .replace(/\u005B|\u005D/g, '');
 
 const _hasHan = (s: string) => /[\u4e00-\u9fff]/.test(s);
 
@@ -313,7 +330,9 @@ const matchesSearch = (h: Hero, term: string) => {
   try {
     const hit = match(cnText, q);
     if (hit && hit.length) return true;
-  } catch {}
+  } catch {
+    // pinyin-pro can throw for rare punctuation-only input; fallback matching continues below.
+  }
 
   // 容错：对拼音串做 fuzzy substring（打错 1~2 个字母、漏字也能搜到）
   if (_fuzzySubstr(py, q, limit)) return true;
@@ -329,17 +348,36 @@ const matchesSearch = (h: Hero, term: string) => {
 // UI COMPONENTS
 // ==========================================
 
-const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: (id: string) => void }) => {
+const Lobby = ({ onCreate, onJoin }: { onCreate: (config: LobbyConfig) => Promise<void>; onJoin: (id: string) => void }) => {
   const [activeTab, setActiveTab] = useState<'CREATE' | 'JOIN'>('CREATE');
-  const [config, setConfig] = useState({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' });
+  const [config, setConfig] = useState<LobbyConfig>({ matchTitle: '', teamA: 'T1', teamB: 'GEN', seriesMode: 'BO3', draftMode: 'STANDARD' });
   const [joinId, setJoinId] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const createRoom = async () => {
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      await onCreate(config);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '创建房间失败，请稍后重试。');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const joinRoom = () => {
+    const normalized = joinId.trim();
+    if (normalized) onJoin(normalized);
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative overflow-hidden">
-      <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_30%_30%,rgba(234,179,8,0.15),transparent_55%),radial-gradient(circle_at_70%_60%,rgba(59,130,246,0.12),transparent_55%),radial-gradient(circle_at_40%_80%,rgba(239,68,68,0.10),transparent_55%)]" />
+      <div className="absolute inset-0 opacity-25 bg-[linear-gradient(135deg,rgba(234,179,8,0.12),transparent_35%),linear-gradient(315deg,rgba(59,130,246,0.10),transparent_38%)]" />
       <div className="absolute top-0 left-0 w-full h-full opacity-10 bg-[url('https://lol.qq.com/act/a20220120lpl/img/bg.jpg')] bg-cover bg-center" />
 
-      <div className="max-w-xl w-full bg-slate-900/75 backdrop-blur-2xl border border-slate-700/70 rounded-3xl p-8 shadow-2xl z-10">
+      <div className="max-w-xl w-full bg-slate-900/75 backdrop-blur-2xl border border-slate-700/70 rounded-3xl p-5 sm:p-8 shadow-2xl z-10">
         <div className="text-center mb-8">
           <div className="mx-auto w-16 h-16 rounded-2xl bg-gradient-to-br from-yellow-500/25 to-slate-800/30 border border-slate-700/60 flex items-center justify-center shadow-lg">
             <Sword size={32} className="text-yellow-400" />
@@ -384,7 +422,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Team A Name</label>
                 <input
@@ -408,7 +446,7 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
             <div>
               <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Series Format</label>
               <div className="flex gap-2">
-                {['BO1', 'BO2', 'BO3', 'BO5'].map((m) => (
+                {SERIES_MODE_OPTIONS.map((m) => (
                   <button
                     key={m}
                     onClick={() => setConfig({ ...config, seriesMode: m })}
@@ -455,11 +493,18 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
               </div>
             </div>
 
+            {error && (
+              <div className="rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-sm text-red-200">
+                {error}
+              </div>
+            )}
+
             <button
-              onClick={() => onCreate(config)}
-              className="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-white py-3.5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-yellow-900/15 transition-transform hover:scale-[1.01] active:scale-[0.99]"
+              onClick={createRoom}
+              disabled={isSubmitting || !config.teamA.trim() || !config.teamB.trim()}
+              className="w-full bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-white py-3.5 rounded-2xl font-black text-lg mt-4 shadow-xl shadow-yellow-900/15 transition-transform hover:scale-[1.01] active:scale-[0.99] disabled:opacity-50 disabled:hover:scale-100"
             >
-              CREATE LOBBY
+              {isSubmitting ? 'CREATING...' : 'CREATE LOBBY'}
             </button>
 
             <div className="pt-2 text-[11px] text-slate-500 text-center">
@@ -473,11 +518,14 @@ const Lobby = ({ onCreate, onJoin }: { onCreate: (config: any) => void; onJoin: 
               placeholder="Enter Room ID"
               className="w-full bg-slate-950/80 border border-slate-700/70 rounded-2xl p-4 text-white text-center font-mono text-xl uppercase tracking-widest focus:outline-none focus:ring-2 focus:ring-yellow-500/20 focus:border-yellow-500/30"
               value={joinId}
-              onChange={(e) => setJoinId(e.target.value)}
+              onChange={(e) => setJoinId(e.target.value.trim())}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') joinRoom();
+              }}
             />
             <button
-              disabled={!joinId}
-              onClick={() => onJoin(joinId)}
+              disabled={!joinId.trim()}
+              onClick={joinRoom}
               className="w-full bg-slate-700 hover:bg-slate-600 text-white py-3.5 rounded-2xl font-bold text-lg disabled:opacity-50 transition-all"
             >
               CONNECT
@@ -494,13 +542,13 @@ const RoleSelectionModal = ({ state, onSelect }: { state: DraftState; onSelect: 
 
   return (
     <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-      <div className="bg-slate-900/85 backdrop-blur-2xl border border-slate-700/70 p-8 rounded-3xl max-w-2xl w-full shadow-2xl">
+      <div className="bg-slate-900/85 backdrop-blur-2xl border border-slate-700/70 p-5 sm:p-8 rounded-3xl max-w-2xl w-full shadow-2xl">
         <div className="text-center mb-7">
           <h1 className="text-3xl font-black text-white italic tracking-tight mb-2">SELECT YOUR ROLE</h1>
           <p className="text-slate-400 text-sm">{state.matchTitle || 'Standard Match'} • {state.seriesMode}</p>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <button
             onClick={() => onSelect('TEAM_A')}
             className="group h-32 bg-slate-800/70 hover:bg-slate-700/70 border border-slate-600/70 hover:border-white/30 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all hover:scale-[1.01]"
@@ -562,14 +610,14 @@ const HeroCard = ({ hero, status, onClick, isHovered, isFearlessBanned }: any) =
     : 'border-slate-700/60 hover:border-slate-500/70 hover:bg-slate-800/40';
   const special = 'border-dashed border-slate-700/60 bg-slate-900/40';
 
-  let visual = `${glass} ${ring}`;
+  let visual: string;
   if (isFearlessBanned) visual = `${disabled}`;
   else if (status === 'AVAILABLE') visual = `${available} ${isSpecial ? special : ''}`;
   else visual = `${disabled}`;
 
   return (
     <div
-      className={`${base} ${visual} ${clickable ? 'cursor-pointer' : ''}`}
+      className={`${base} ${glass} ${ring} ${visual} ${clickable ? 'cursor-pointer' : ''}`}
       onClick={clickable ? onClick : undefined}
       title={`${primary || ''}${hero?.nameCn ? ` · ${hero.nameCn}` : ''}${hero?.name ? ` (${hero.name})` : ''}`}
     >
@@ -665,11 +713,12 @@ const TeamPanel = ({
   return (
     <div
       className={[
-        'flex flex-col w-80 h-full',
+        isBlue ? 'order-2 lg:order-none' : 'order-3 lg:order-none',
+        'flex flex-col w-full lg:w-64 2xl:w-80 lg:h-full lg:overflow-y-auto shrink-0',
         'bg-slate-950/40',
         'border-r border-l',
         isBlue ? `border-r-0 border-l ${borderColor}` : `border-l-0 border-r ${borderColor}`,
-        'px-4 py-5',
+        'px-3 py-4 lg:px-4 lg:py-5',
         'relative',
         active ? 'ring-1 ring-inset ' + (isBlue ? 'ring-blue-500/60' : 'ring-red-500/60') : '',
       ].join(' ')}
@@ -678,7 +727,7 @@ const TeamPanel = ({
 
       <div className="relative mb-6 flex flex-col items-center">
         <div className="flex items-center gap-2 mb-1">
-          <span className={`text-3xl font-black italic uppercase tracking-tight ${textColor}`}>{teamName}</span>
+          <span className={`text-2xl lg:text-3xl font-black italic uppercase tracking-tight ${textColor}`}>{teamName}</span>
           <div className="flex gap-1">
             {[...Array(safeWins)].map((_, i) => (
               <div key={i} className="w-2 h-2 bg-yellow-500 rounded-full shadow" />
@@ -711,7 +760,7 @@ const TeamPanel = ({
         )}
       </div>
 
-      <div className="relative flex-1 space-y-2 mb-4">
+      <div className="relative flex-1 grid grid-cols-1 sm:grid-cols-5 lg:grid-cols-1 gap-2 mb-4">
         {pickSlots.map((_, i) => {
           const heroId = safePicks[i];
           const hero = heroId ? getHero(heroId) : null;
@@ -725,7 +774,7 @@ const TeamPanel = ({
               key={i}
               onClick={() => (allowClick ? onSwapClick(side, i) : undefined)}
               className={[
-                'h-[108px] w-full rounded-2xl border overflow-hidden relative',//左右两侧已选英雄框高
+                'h-[86px] lg:h-[108px] w-full rounded-2xl border overflow-hidden relative',//左右两侧已选英雄框高
                 'bg-slate-900/55 backdrop-blur',
                 isSwapSelected ? 'border-green-400/80 ring-2 ring-green-400/30' : 'border-slate-700/50',
                 allowClick ? 'cursor-pointer hover:bg-slate-800/60 hover:border-slate-500/60' : '',
@@ -820,7 +869,7 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
 
   return (
     <div className="bg-slate-900/65 backdrop-blur border border-slate-700/60 rounded-2xl p-4 mb-3 shadow-lg shadow-black/20">
-      <div className="flex justify-between items-center mb-3">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 mb-3">
         <span className="text-yellow-400 font-black tracking-widest text-sm">GAME {game.gameIdx}</span>
         <div className="flex items-center gap-2 text-xm font-mono">
           <span className="text-slate-300 font-black tracking-wider">WINNER:</span>
@@ -828,16 +877,16 @@ const GameHistoryCard = ({ game, state }: { game: GameResultSnapshot; state: Dra
         </div>
       </div>
 
-      <div className="flex items-center gap-4 mb-2">
-        <div className="w-28 text-right text-blue-300 font-black text-xs">{blueTeamName}</div>
-        <div className="flex gap-1">{game.blueBans.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'BAN')}</React.Fragment>)}</div>
-        <div className="flex gap-1 ml-auto">{game.bluePicks.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'PICK')}</React.Fragment>)}</div>
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 mb-3">
+        <div className="sm:w-28 sm:text-right text-blue-300 font-black text-xs">{blueTeamName}</div>
+        <div className="flex gap-1 flex-wrap">{game.blueBans.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'BAN')}</React.Fragment>)}</div>
+        <div className="flex gap-1 flex-wrap sm:ml-auto">{game.bluePicks.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'PICK')}</React.Fragment>)}</div>
       </div>
 
-      <div className="flex items-center gap-4">
-        <div className="w-28 text-right text-red-300 font-black text-xs">{redTeamName}</div>
-        <div className="flex gap-1">{game.redBans.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'BAN')}</React.Fragment>)}</div>
-        <div className="flex gap-1 ml-auto">{game.redPicks.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'PICK')}</React.Fragment>)}</div>
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+        <div className="sm:w-28 sm:text-right text-red-300 font-black text-xs">{redTeamName}</div>
+        <div className="flex gap-1 flex-wrap">{game.redBans.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'BAN')}</React.Fragment>)}</div>
+        <div className="flex gap-1 flex-wrap sm:ml-auto">{game.redPicks.map((h, i) => <React.Fragment key={i}>{renderMini(h, 'PICK')}</React.Fragment>)}</div>
       </div>
     </div>
   );
@@ -860,9 +909,8 @@ export default function App() {
   const [roleFilter, setRoleFilter] = useState<string>('ALL');
   const [swapSelection, setSwapSelection] = useState<{ side: Side; index: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: 'error' | 'info' } | null>(null);
-
-  const [lastSeenSeq, setLastSeenSeq] = useState<number>(0);
-  const [, setMissedActions] = useState<DraftAction[]>([]);
+  const lastSeenSeqRef = useRef<number>(0);
+  const reconnectTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (toast) {
@@ -874,39 +922,57 @@ export default function App() {
   // WS Connection
   useEffect(() => {
     if (!roomId) return;
-    //const ws = new WebSocket(`ws://localhost:8080?room=${roomId}`);
-    const ws = new WebSocket(`wss://zijing.yejiaxin.online?room=${roomId}`);
-    wsRef.current = ws;
+    let closedByEffect = false;
+    lastSeenSeqRef.current = 0;
 
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
+    const connect = () => {
+      const ws = new WebSocket(`${WS_BASE_URL}?room=${encodeURIComponent(roomId)}`);
+      wsRef.current = ws;
 
-    ws.onmessage = async (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'STATE_SYNC') {
-          const ns = msg.payload as DraftState;
-          if (lastSeenSeq > 0 && ns.lastActionSeq > lastSeenSeq + 1) {
-            //const res = await fetch(`http://localhost:8080/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
-            const res = await fetch(`https://zijing.yejiaxin.online/rooms/${roomId}/actions?afterSeq=${lastSeenSeq}`);
-            const data = await res.json();
-            if (data.actions?.length) setMissedActions((prev) => [...prev, ...data.actions]);
-          }
-          setLastSeenSeq(ns.lastActionSeq);
-          setState(ns);
-        } else if (msg.type === 'ACTION_REJECTED') {
-          setToast({ msg: msg.payload.reason, type: 'error' });
+      ws.onopen = () => setIsConnected(true);
+      ws.onclose = () => {
+        setIsConnected(false);
+        if (!closedByEffect) {
+          reconnectTimerRef.current = window.setTimeout(connect, 1200);
         }
-      } catch (e) {
-        console.error(e);
-      }
+      };
+
+      ws.onmessage = (event) => {
+        if (closedByEffect) return;
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'STATE_SYNC') {
+            const ns = msg.payload as DraftState;
+            const lastSeenSeq = lastSeenSeqRef.current;
+            if (lastSeenSeq > 0 && ns.lastActionSeq > lastSeenSeq + 1) {
+              setToast({ msg: '已恢复最新房间状态', type: 'info' });
+            }
+            lastSeenSeqRef.current = ns.lastActionSeq;
+            setState(ns);
+          } else if (msg.type === 'ACTION_REJECTED') {
+            setToast({ msg: msg.payload.reason, type: 'error' });
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
     };
 
-    return () => ws.close();
-  }, [roomId, lastSeenSeq]);
+    connect();
+
+    return () => {
+      closedByEffect = true;
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+      wsRef.current?.close();
+    };
+  }, [roomId]);
 
   const send = (type: string, payload: any = {}) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type, payload: { ...payload, actorRole: userRole } }));
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type, payload: { ...payload, actorRole: userRole } }));
+    } else {
+      setToast({ msg: '连接未就绪，正在重连...', type: 'error' });
+    }
   };
 
   // Helpers
@@ -936,6 +1002,15 @@ export default function App() {
     return false;
   }, [state, isReferee, currentStep, mySide]);
 
+  const canSubmitSwap = Boolean(
+    state &&
+      state.status === 'RUNNING' &&
+      state.phase === 'SWAP' &&
+      !state.paused &&
+      !isSpectator &&
+      (isReferee || mySide)
+  );
+
   // Timer
   useEffect(() => {
     if (!state || state.status !== 'RUNNING' || state.paused) {
@@ -945,32 +1020,14 @@ export default function App() {
     }
     const i = setInterval(() => setTimeLeft(Math.max(0, Math.ceil((state.stepEndsAt - Date.now()) / 1000))), 200);
     return () => clearInterval(i);
-  }, [state?.stepEndsAt, state?.status, state?.paused, state?.pausedAt]);
+  }, [state]);
 
   // Actions
   const handleLock = () => {
-  if (!hoveredHeroId || !canInteract) return;
-
-  let heroIdToSend = hoveredHeroId;
-
-  // ✅ 前端展开 RANDOM
-  if (hoveredHeroId === SPECIAL_ID_RANDOM && (currentStep?.type === 'PICK' || currentStep?.type === 'BAN')) {
-    const pool = HEROES
-      .filter((h) => !h.id.startsWith('special_'))               // 排除 special
-      .filter((h) => !usedHeroes.has(h.id))                      // 排除已被 ban/pick
-      .filter((h) => !fearlessBannedHeroes.has(h.id));           // 排除 fearless 禁用
-
-    if (pool.length === 0) {
-      setToast({ msg: '没有可随机的英雄（都已被占用/禁用）', type: 'error' });
-      return;
-    }
-
-    heroIdToSend = pool[Math.floor(Math.random() * pool.length)].id;
-  }
-
-  send('ACTION_SUBMIT', { heroId: heroIdToSend });
-  setHoveredHeroId(null);
-};
+    if (!hoveredHeroId || !canInteract) return;
+    send('ACTION_SUBMIT', { heroId: hoveredHeroId });
+    setHoveredHeroId(null);
+  };
 
 
   const handleSwap = (side: Side, index: number) => {
@@ -984,25 +1041,34 @@ export default function App() {
     } else setSwapSelection(null);
   };
 
-  const handleCreate = async (cfg: any) => {
-    //const res = await fetch('http://localhost:8080/rooms', { method: 'POST', body: JSON.stringify(cfg) });
-    const res = await fetch('https://zijing.yejiaxin.online/rooms', { method: 'POST', body: JSON.stringify(cfg) });
+  const copyRoomLink = async (room: string) => {
+    const roomUrl = `${window.location.origin}${window.location.pathname}?room=${room}`;
+    try {
+      await navigator.clipboard.writeText(roomUrl);
+      setToast({ msg: '房间链接已复制', type: 'info' });
+    } catch {
+      setToast({ msg: `房间链接：${roomUrl}`, type: 'info' });
+    }
+  };
+
+  const handleCreate = async (cfg: LobbyConfig) => {
+    const res = await fetch(`${API_BASE_URL}/rooms`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+    if (!res.ok) throw new Error('创建房间失败，请确认服务端已启动。');
     const data = await res.json();
     window.history.pushState(null, '', `?room=${data.roomId}`);
     setRoomId(data.roomId);
-    // === 新增：自动复制网址并弹窗 ===
-    const roomUrl = `${window.location.origin}/?room=${data.roomId}`;
-    navigator.clipboard.writeText(roomUrl).then(() => {
-      alert(`✅ 房间已创建！\n\n网址已自动复制到剪贴板：\n${roomUrl}`);
-    }).catch(() => {
-      // 如果浏览器不支持自动复制，则只弹窗显示网址
-      alert(`✅ 房间已创建！\n\n请手动复制网址：\n${roomUrl}`);
-    });
+    await copyRoomLink(data.roomId);
   };
 
   const handleJoin = (id: string) => {
-    window.history.pushState(null, '', `?room=${id}`);
-    setRoomId(id);
+    const room = id.trim();
+    if (!room) return;
+    window.history.pushState(null, '', `?room=${room}`);
+    setRoomId(room);
   };
 
   const handleExitRoom = () => {
@@ -1011,6 +1077,8 @@ export default function App() {
     setRoomId(null);
     setState(null);
     setIsConnected(false);
+    setUserRole(null);
+    lastSeenSeqRef.current = 0;
     if (wsRef.current) wsRef.current.close();
   };
 
@@ -1059,20 +1127,24 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-slate-950 text-slate-200 font-sans flex flex-col selection:bg-yellow-500/30 relative overflow-hidden">
+    <div className="min-h-screen lg:h-screen bg-slate-950 text-slate-200 font-sans flex flex-col selection:bg-yellow-500/30 relative overflow-y-auto lg:overflow-hidden">
       {/* Ambient background */}
-      <div className="absolute inset-0 opacity-25 bg-[radial-gradient(circle_at_20%_20%,rgba(234,179,8,0.10),transparent_55%),radial-gradient(circle_at_80%_10%,rgba(59,130,246,0.10),transparent_55%),radial-gradient(circle_at_70%_85%,rgba(239,68,68,0.08),transparent_55%)] pointer-events-none" />
+      <div className="absolute inset-0 opacity-25 bg-[linear-gradient(130deg,rgba(234,179,8,0.10),transparent_42%),linear-gradient(310deg,rgba(59,130,246,0.10),transparent_45%),linear-gradient(180deg,transparent,rgba(15,23,42,0.75))] pointer-events-none" />
 
       {toast && (
-        <div className="fixed top-24 left-1/2 -translate-x-1/2 bg-red-600 px-6 py-3 rounded-full shadow-xl z-50 animate-bounce font-black">
+        <div
+          className={`fixed top-24 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full shadow-xl z-50 font-black max-w-[min(92vw,720px)] text-center ${
+            toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-900'
+          }`}
+        >
           {toast.msg}
         </div>
       )}
       {!userRole && <RoleSelectionModal state={state} onSelect={setUserRole} />}
 
       {/* Header */}
-      <header className="h-20 bg-slate-900/70 backdrop-blur-2xl border-b border-slate-800/70 flex items-center justify-between px-6 md:px-8 shadow-lg z-10 relative">
-        <div className="flex items-center gap-4 min-w-0">
+      <header className="min-h-20 bg-slate-900/70 backdrop-blur-2xl border-b border-slate-800/70 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between px-4 py-3 lg:px-8 lg:py-0 shadow-lg z-10 relative">
+        <div className="flex items-center gap-4 min-w-0 w-full lg:w-auto justify-between lg:justify-start">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-yellow-500/20 to-slate-800/20 border border-slate-700/60 flex items-center justify-center shadow-md">
               <Sword className="text-yellow-400" size={18} />
@@ -1099,7 +1171,7 @@ export default function App() {
         </div>
 
         {/* Center status */}
-        <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center">
+        <div className="lg:absolute lg:left-1/2 lg:-translate-x-1/2 flex flex-col items-center">
           <div
             className={[
               'text-[10px] font-black px-3 py-1 rounded-full mb-1 tracking-widest border',
@@ -1135,7 +1207,7 @@ export default function App() {
         </div>
 
         {/* Right controls */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 w-full lg:w-auto justify-center lg:justify-end flex-wrap">
           <div
             className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-black ${
               isConnected ? 'bg-green-950/20 border-green-800/50 text-green-300' : 'bg-slate-900/40 border-slate-700/60 text-slate-400'
@@ -1149,17 +1221,18 @@ export default function App() {
           {isReferee && (
             <div className="flex bg-slate-800/60 rounded-2xl p-1 border border-slate-700/60">
               {state.status === 'RUNNING' && !state.paused && (
-                <button onClick={() => send('ACTION_SUBMIT', { type: 'PAUSE_GAME', reason: 'Admin' })} className="p-2 hover:text-yellow-400 transition-colors">
+                <button aria-label="Pause game" onClick={() => send('ACTION_SUBMIT', { type: 'PAUSE_GAME', reason: 'Admin' })} className="p-2 hover:text-yellow-400 transition-colors">
                   <Pause size={16} />
                 </button>
               )}
               {state.paused && (
-                <button onClick={() => send('ACTION_SUBMIT', { type: 'RESUME_GAME' })} className="p-2 hover:text-green-400 transition-colors">
+                <button aria-label="Resume game" onClick={() => send('ACTION_SUBMIT', { type: 'RESUME_GAME' })} className="p-2 hover:text-green-400 transition-colors">
                   <PlayCircle size={16} />
                 </button>
               )}
               {state.status === 'NOT_STARTED' && bothSidesSet && (
                 <button
+                  aria-label="Start game"
                   onClick={() => send('ACTION_SUBMIT', { type: 'START_GAME' })}
                   disabled={!state.blueReady || !state.redReady}
                   className="p-2 hover:text-green-400 disabled:opacity-30 transition-colors"
@@ -1167,17 +1240,36 @@ export default function App() {
                   <Play size={16} />
                 </button>
               )}
-              <button onClick={() => send('ACTION_SUBMIT', { type: 'RESET_GAME' })} className="p-2 hover:text-white transition-colors">
+              <button aria-label="Reset match" onClick={() => { if (window.confirm('重置整个系列赛？比分和本房间战报将清空。')) send('ACTION_SUBMIT', { type: 'RESET_GAME' }); }} className="p-2 hover:text-white transition-colors">
                 <RotateCcw size={16} />
               </button>
             </div>
           )}
+
+          <button
+            aria-label="Copy room link"
+            onClick={() => copyRoomLink(roomId)}
+            className="p-2 bg-slate-800/60 hover:bg-slate-700/70 border border-slate-700/60 text-slate-200 rounded-full transition-all"
+            title="Copy room link"
+          >
+            <Copy size={14} />
+          </button>
+
+          <button
+            aria-label="Switch role"
+            onClick={() => setUserRole(null)}
+            className="p-2 bg-slate-800/60 hover:bg-slate-700/70 border border-slate-700/60 text-slate-200 rounded-full transition-all"
+            title="Switch role"
+          >
+            <UserCog size={14} />
+          </button>
 
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800/60 border border-slate-700/60 text-xs font-black text-slate-300">
             {userRole === 'TEAM_A' ? state.teamA.name : userRole === 'TEAM_B' ? state.teamB.name : userRole}
           </div>
 
           <button
+            aria-label="Exit room"
             onClick={handleExitRoom}
             className="flex items-center gap-1 text-xs bg-slate-800/60 hover:bg-slate-700/70 border border-slate-700/60 text-slate-200 px-3 py-1.5 rounded-full font-black transition-all"
             title="Exit Room"
@@ -1187,7 +1279,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 flex overflow-hidden relative z-0">
+      <main className="flex-1 flex flex-col lg:flex-row overflow-visible lg:overflow-hidden relative z-0">
         <TeamPanel
           side="BLUE"
           bans={state.blueBans}
@@ -1205,7 +1297,7 @@ export default function App() {
           paused={state.paused}
         />
 
-        <div className="flex-1 flex flex-col bg-slate-950/20 relative">
+        <div className="order-1 lg:order-none flex-1 flex flex-col bg-slate-950/20 relative min-h-[620px] lg:min-h-0">
           {state.status === 'NOT_STARTED' && !bothSidesSet && (
             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm">
               <div className="bg-slate-900/70 border border-slate-700/60 rounded-3xl p-8 shadow-2xl max-w-3xl w-full mx-6">
@@ -1244,13 +1336,13 @@ export default function App() {
 
           {state.status === 'RUNNING' && state.phase === 'DRAFT' && (
             <>
-              <div className="flex-1 flex items-start justify-center p-6 overflow-hidden">
-                <div className="w-full max-w-6xl">
+              <div className="flex-1 flex items-start justify-center p-3 sm:p-4 xl:p-6 overflow-visible lg:overflow-hidden">
+                <div className="w-full max-w-5xl 2xl:max-w-6xl">
                   {/* ===== White Panel (like reference) ===== */}
                   <div className="bg-slate-100 border border-slate-300 rounded-lg shadow-xl overflow-hidden">
                     {/* Top tabs + search */}
-                    <div className="flex items-stretch bg-white border-b border-slate-300">
-                      <div className="flex">
+                    <div className="flex flex-col bg-white border-b border-slate-300">
+                      <div className="flex overflow-x-auto">
                         {[
                           ['ALL', '全部'],
                           ['TOP', '上单'],
@@ -1264,7 +1356,7 @@ export default function App() {
                             <button
                               key={val}
                               onClick={() => setRoleFilter(val)}
-                              className={`relative px-6 py-3 font-bold border-r border-slate-200 ${
+                              className={`relative shrink-0 px-4 sm:px-6 py-3 font-bold border-r border-slate-200 ${
                                 active ? 'bg-white text-slate-900' : 'bg-slate-50 text-slate-500 hover:bg-white'
                               }`}
                             >
@@ -1277,11 +1369,14 @@ export default function App() {
                         })}
                       </div>
 
-                      <div className="ml-auto flex items-center gap-3 px-4">
+                      <div className="flex items-center gap-3 px-4 py-2">
+                        <span className="hidden sm:inline text-xs font-bold text-slate-500 whitespace-nowrap">
+                          {filteredHeroes.length} / {HEROES.length}
+                        </span>
                         <input
                           type="text"
                           placeholder="搜索..."
-                          className="w-80 max-w-[40vw] bg-white border border-slate-300 rounded px-3 py-2 text-slate-800 placeholder:text-slate-400 focus:outline-none"
+                          className="w-full min-w-0 bg-white border border-slate-300 rounded px-3 py-2 text-slate-800 placeholder:text-slate-400 focus:outline-none"
                           value={searchTerm}
                           onChange={(e) => setSearchTerm(e.target.value)}
                         />
@@ -1290,10 +1385,24 @@ export default function App() {
                     </div>
 
                     {/* Hero pool area (smaller frame, scroll inside) */}
-                    <div className="bg-slate-200/60 p-4">
-                      <div className="bg-white border border-slate-300 rounded-md p-5 h-[520px] overflow-y-auto">
-                        <div className="grid grid-cols-10 gap-4">
-                          {filteredHeroes.map((h) => {
+                    <div className="bg-slate-200/60 p-2 sm:p-4">
+                      <div className="bg-white border border-slate-300 rounded-md p-3 sm:p-5 h-[50vh] min-h-[300px] lg:h-[min(520px,calc(100dvh-350px))] overflow-y-auto">
+                        <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 2xl:grid-cols-10 gap-2 sm:gap-4">
+                          {filteredHeroes.length === 0 ? (
+                            <div className="col-span-full h-72 flex flex-col items-center justify-center gap-3 text-slate-500">
+                              <Search className="w-8 h-8" />
+                              <div className="font-black">没有找到匹配的英雄</div>
+                              <button
+                                onClick={() => {
+                                  setSearchTerm('');
+                                  setRoleFilter('ALL');
+                                }}
+                                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+                              >
+                                <XCircle size={16} /> 清空筛选
+                              </button>
+                            </div>
+                          ) : filteredHeroes.map((h) => {
                             const used = usedHeroes.has(h.id);
                             const isFearlessBanned = fearlessBannedHeroes.has(h.id);
                             const status = h.id.startsWith('special')
@@ -1323,16 +1432,16 @@ export default function App() {
                   </div>
 
                   {/* ===== Bottom bar: big bans + big confirm button (like reference) ===== */}
-                  <div className="mt-5 flex items-center justify-between gap-6">
+                  <div className="mt-5 grid grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_minmax(0,1fr)] items-center gap-3">
                     {/* Blue bans */}
-                    <div className="flex gap-3">
-                      {(state.blueBans || Array(5).fill(null)).slice(0,5).map((heroId, i) => {
+                    <div className="flex gap-1 order-2 xl:order-none min-w-0">
+                      {Array.from({ length: 5 }, (_, i) => state.blueBans[i] || null).map((heroId, i) => {
                         const hero = heroId ? getHero(heroId) : null;
                         const img = hero ? getHeroImageUrl(hero) : null;
                         const isNoBan = heroId === SPECIAL_ID_NONE;
 
                         return (
-                          <div key={i} className="w-16 h-16 bg-slate-300 rounded border border-slate-400 overflow-hidden relative flex items-center justify-center">
+                          <div key={i} className="flex-1 min-w-0 aspect-square max-w-16 bg-slate-300 rounded border border-slate-400 overflow-hidden relative flex items-center justify-center">
                             {isNoBan ? (
                               <XCircle className="w-9 h-9 text-slate-600" />
                             ) : img ? (
@@ -1349,7 +1458,7 @@ export default function App() {
                     </div>
 
                     {/* Confirm button */}
-                    <div className="flex flex-col items-center gap-2">
+                    <div className="flex flex-col items-center gap-2 order-1 xl:order-none col-span-2 xl:col-span-1 w-full min-w-0">
                       {getHero(hoveredHeroId) && (
                         <div className="text-slate-200 font-black">
                           {getHeroDisplayName(getHero(hoveredHeroId) || null)}
@@ -1358,7 +1467,7 @@ export default function App() {
                       <button
                         onClick={handleLock}
                         disabled={!hoveredHeroId || !canInteract}
-                        className="w-[360px] h-20 bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-slate-900 text-3xl font-black shadow-2xl
+                        className="w-full max-w-[360px] h-16 sm:h-20 bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-slate-900 text-2xl sm:text-3xl font-black shadow-2xl
                                   [clip-path:polygon(6%_0,94%_0,100%_100%,0_100%)]"
                       >
                         确定
@@ -1366,14 +1475,14 @@ export default function App() {
                     </div>
 
                     {/* Red bans */}
-                    <div className="flex gap-3">
-                      {(state.redBans || Array(5).fill(null)).slice(0,5).reverse().map((heroId, i) => {
+                    <div className="flex gap-1 order-3 xl:order-none min-w-0">
+                      {Array.from({ length: 5 }, (_, i) => state.redBans[i] || null).reverse().map((heroId, i) => {
                         const hero = heroId ? getHero(heroId) : null;
                         const img = hero ? getHeroImageUrl(hero) : null;
                         const isNoBan = heroId === SPECIAL_ID_NONE;
 
                         return (
-                          <div key={i} className="w-16 h-16 bg-slate-300 rounded border border-slate-400 overflow-hidden relative flex items-center justify-center">
+                          <div key={i} className="flex-1 min-w-0 aspect-square max-w-16 bg-slate-300 rounded border border-slate-400 overflow-hidden relative flex items-center justify-center">
                             {isNoBan ? (
                               <XCircle className="w-9 h-9 text-slate-600" />
                             ) : img ? (
@@ -1400,7 +1509,7 @@ export default function App() {
               <div className="bg-slate-900/70 border border-slate-700/60 rounded-3xl p-10 shadow-2xl text-center">
                 <h2 className="text-4xl font-black text-white italic mb-4">SWAP PHASE</h2>
                 <p className="text-slate-400 mb-8">Click picks to swap positions, then confirm.</p>
-                {canInteract && (
+                {canSubmitSwap && (
                   <div className="w-full flex justify-center">
                     <button
                       onClick={() => send('ACTION_SUBMIT', { type: 'FINISH_SWAP' })}

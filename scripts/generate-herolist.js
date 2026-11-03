@@ -9,6 +9,7 @@ const https = require('https');
 const DATA_SOURCE_URL = 'https://game.gtimg.cn/images/lol/act/img/js/heroList/hero_list.js';
 // 修改点：路径改为指向 apps/web/src/data/heroes.ts
 const OUTPUT_FILE = path.join(__dirname, '../apps/web/src/data/heroes.ts');
+const SERVER_HERO_POOL_FILE = path.join(__dirname, '../apps/server/src/heroPool.ts');
 
 /**
  * ID 规范化
@@ -86,11 +87,11 @@ const run = async () => {
 
   try {
     const rawContent = await fetchRawContent(DATA_SOURCE_URL);
-    
+
     // 解析 JSON
     const data = JSON.parse(rawContent);
     const champions = data.hero || [];
-    
+
     if (champions.length === 0) {
       throw new Error('抓取到的英雄列表为空。');
     }
@@ -121,21 +122,33 @@ const run = async () => {
  * Generated at: ${new Date().toLocaleString()}
  */
 
-export interface Hero { 
-  id: string; 
-  name: string; 
-  nameCn: string; 
-  titleCn: string; 
-  roles: string[]; 
+export interface Hero {
+  id: string;
+  name: string;
+  nameCn: string;
+  titleCn: string;
+  roles: string[];
 }
 
 export const RAW_HEROES: Hero[] = ${JSON.stringify(heroList, null, 2)};
 `;
 
     fs.writeFileSync(OUTPUT_FILE, fileContent.trim());
-    
+
+    const heroIds = heroList.map((hero) => hero.id);
+    const serverPoolContent = `// Auto-generated from apps/web/src/data/heroes.ts.
+// Keep this file in sync by running scripts/generate-herolist.js.
+
+export const HERO_IDS = ${JSON.stringify(heroIds, null, 2)} as const;
+
+export type HeroId = (typeof HERO_IDS)[number];
+export const HERO_ID_SET = new Set<string>(HERO_IDS);
+`;
+    fs.writeFileSync(SERVER_HERO_POOL_FILE, serverPoolContent);
+
     console.log('\n✨ 英雄列表（含中文）同步完成！');
     console.log(`保存路径: ${OUTPUT_FILE}`);
+    console.log(`服务端英雄池: ${SERVER_HERO_POOL_FILE}`);
     console.log('-------------------------------------------');
     console.log('📊 同步详情:');
     console.log(`- 英雄总数: ${heroList.length}`);

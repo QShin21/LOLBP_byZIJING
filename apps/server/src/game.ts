@@ -2,6 +2,8 @@
 // SHARED GAME LOGIC (Server Authoritative)
 // ==========================================
 
+import { HERO_IDS, HERO_ID_SET } from './heroPool';
+
 export type Side = 'BLUE' | 'RED';
 export type ActionType = 'BAN' | 'PICK' | 'SWAP' | 'FINISH_SWAP' | 'START_GAME' | 'RESET_GAME' | 'TOGGLE_READY' | 'PAUSE_GAME' | 'RESUME_GAME' | 'SET_SIDES' | 'REPORT_RESULT';
 export type DraftPhase = 'DRAFT' | 'SWAP' | 'FINISHED';
@@ -28,9 +30,9 @@ export interface DraftAction {
   side?: Side;
   heroId?: string;
   swapData?: { fromIndex: number; toIndex: number };
-  actorRole?: string; 
+  actorRole?: string;
   reason?: string;
-  payload?: any; 
+  payload?: any;
 }
 
 export interface GameResultSnapshot {
@@ -46,27 +48,27 @@ export interface GameResultSnapshot {
 
 export interface DraftState {
   lastActionSeq: number;
-  
+
   matchTitle: string;
   seriesMode: SeriesMode;
   draftMode: DraftMode;
   teamA: { name: string; wins: number };
   teamB: { name: string; wins: number };
-  currentGameIdx: number; 
-  sides: { [key in TeamId]: Side | null }; 
-  nextSideSelector: TeamId | 'REFEREE' | null; 
-  
+  currentGameIdx: number;
+  sides: { [key in TeamId]: Side | null };
+  nextSideSelector: TeamId | 'REFEREE' | null;
+
   seriesHistory: GameResultSnapshot[];
 
   status: DraftStatus;
   phase: DraftPhase;
-  stepIndex: number; 
-  draftStepIndex: number; 
+  stepIndex: number;
+  draftStepIndex: number;
   blueBans: string[];
   redBans: string[];
   bluePicks: string[];
   redPicks: string[];
-  history: DraftAction[]; 
+  history: DraftAction[];
   stepEndsAt: number;
   blueReady: boolean;
   redReady: boolean;
@@ -74,13 +76,6 @@ export interface DraftState {
   pauseReason?: string;
   pausedAt?: number;
 }
-
-interface Hero { id: string; }
-const HERO_IDS = [
-  'aatrox', 'ahri', 'akali', 'amumu', 'annie', 'ashe', 'blitz', 'caitlyn', 'camille', 'darius', 
-  'ezreal', 'fiora', 'garen', 'jinx', 'kaisa', 'leesin', 'leona', 'lux', 'malphite', 'masteryi', 
-  'missfortune', 'nautilus', 'sett', 'teemo', 'thresh', 'vi', 'viego', 'yasuo', 'yone', 'zed'
-];
 
 const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
   { side: 'BLUE', type: 'BAN' }, { side: 'RED', type: 'BAN' },
@@ -95,7 +90,7 @@ const DRAFT_SEQUENCE: Omit<DraftStep, 'index'>[] = [
 
 export const INITIAL_STATE: DraftState = {
   lastActionSeq: 0,
-  
+
   matchTitle: '',
   seriesMode: 'BO1',
   draftMode: 'STANDARD',
@@ -121,6 +116,15 @@ export const INITIAL_STATE: DraftState = {
   paused: false,
 };
 
+export const createReplayBase = (state: DraftState): DraftState => ({
+  ...INITIAL_STATE,
+  matchTitle: state.matchTitle,
+  seriesMode: state.seriesMode,
+  draftMode: state.draftMode,
+  teamA: { name: state.teamA.name, wins: 0 },
+  teamB: { name: state.teamB.name, wins: 0 },
+});
+
 export const getCurrentStep = (state: DraftState): DraftStep | null => {
   if (state.draftStepIndex >= DRAFT_SEQUENCE.length) return null;
   return { ...DRAFT_SEQUENCE[state.draftStepIndex], index: state.draftStepIndex };
@@ -132,11 +136,18 @@ const getSideFromRole = (state: DraftState, role: string): Side | null => {
   return null;
 };
 
+const isSide = (value: unknown): value is Side => value === 'BLUE' || value === 'RED';
+const isTeamId = (value: unknown): value is TeamId => value === 'TEAM_A' || value === 'TEAM_B';
+const isSpecialHeroId = (heroId: unknown) => heroId === SPECIAL_ID_NONE || heroId === SPECIAL_ID_RANDOM;
+
+const getUsedHeroIds = (state: DraftState): Set<string> =>
+  new Set([...state.blueBans, ...state.redBans, ...state.bluePicks, ...state.redPicks]);
+
 // --- FEARLESS LOGIC ---
 const getFearlessBannedIds = (state: DraftState): Set<string> => {
   const set = new Set<string>();
   if (state.draftMode !== 'FEARLESS') return set;
-  
+
   state.seriesHistory.forEach(game => {
     game.bluePicks.forEach(id => set.add(id));
     game.redPicks.forEach(id => set.add(id));
@@ -146,24 +157,37 @@ const getFearlessBannedIds = (state: DraftState): Set<string> => {
 
 // --- VALIDATION LOGIC ---
 export const validateMove = (state: DraftState, payload: any): string | null => {
-  const { actorRole, type, side, heroId } = payload; 
+  if (!payload || typeof payload !== 'object') return "Invalid action payload";
+  const { actorRole, type, side, heroId } = payload;
 
   if (!actorRole) return "Unauthorized: No role specified";
   if (actorRole === 'SPECTATOR') return "Spectators cannot perform actions";
+  if (!['REFEREE', 'TEAM_A', 'TEAM_B'].includes(actorRole)) return "Unknown role";
 
   if (['START_GAME', 'RESET_GAME', 'PAUSE_GAME', 'RESUME_GAME', 'REPORT_RESULT'].includes(type)) {
       if (actorRole !== 'REFEREE') return "Only Referee can manage game state";
+      if (type === 'PAUSE_GAME' && (state.status !== 'RUNNING' || state.paused)) return "Game cannot be paused";
+      if (type === 'RESUME_GAME' && (state.status !== 'RUNNING' || !state.paused)) return "Game is not paused";
       if (type === 'START_GAME') {
+        if (state.status !== 'NOT_STARTED') return "Game already started";
         if (!state.sides.TEAM_A || !state.sides.TEAM_B) return "Sides not selected yet";
         if (!state.blueReady || !state.redReady) return "Both teams must be READY to start";
+      }
+      if (type === 'REPORT_RESULT') {
+        if (state.status !== 'FINISHED') return "Draft is not finished yet";
+        if (!isTeamId(payload.winner)) return "Invalid winner";
+        if (state.seriesHistory?.some((game) => game.gameIdx === state.currentGameIdx)) {
+          return "This game result has already been reported";
+        }
       }
       return null;
   }
 
   if (type === 'SET_SIDES') {
     if (state.status !== 'NOT_STARTED') return "Cannot set sides after game started";
+    if (!isSide(payload.sideForA)) return "Invalid side selection";
     const selector = state.nextSideSelector || 'REFEREE';
-    if (actorRole !== selector && actorRole !== 'REFEREE') { 
+    if (actorRole !== selector && actorRole !== 'REFEREE') {
        return `Waiting for ${selector} to select sides`;
     }
     return null;
@@ -171,22 +195,45 @@ export const validateMove = (state: DraftState, payload: any): string | null => 
 
   if (type === 'TOGGLE_READY') {
     if (state.status !== 'NOT_STARTED') return "Cannot toggle ready after game started";
-    if (!state.sides.TEAM_A) return "Sides must be set before ready";
+    if (!state.sides.TEAM_A || !state.sides.TEAM_B) return "Sides must be set before ready";
+    if (!isSide(side)) return "Invalid ready side";
+    if (actorRole !== 'REFEREE' && getSideFromRole(state, actorRole) !== side) {
+      return "You can only toggle your own side";
+    }
     return null;
   }
 
   if (state.paused) return `Game is paused (${state.pauseReason})`;
 
   if (state.status !== 'RUNNING') return `Game is ${state.status}`;
-  if (actorRole === 'REFEREE') return null; 
 
   const actorSide = getSideFromRole(state, actorRole);
-  if (!actorSide) return "You are not assigned a side";
+  if (actorRole !== 'REFEREE' && !actorSide) return "You are not assigned a side";
 
   if (state.phase === 'DRAFT') {
     const currentStep = getCurrentStep(state);
     if (!currentStep) return "Draft finished";
-    if (currentStep.side !== actorSide) return `Not your turn`;
+    if (type && type !== currentStep.type) return "Invalid action for current step";
+    if (actorRole !== 'REFEREE' && currentStep.side !== actorSide) return `Not your turn`;
+    if (!heroId) return "No hero selected";
+
+    if (!isSpecialHeroId(heroId) && !HERO_ID_SET.has(heroId)) {
+      return "Unknown hero";
+    }
+
+    if (currentStep.type === 'PICK' && heroId === SPECIAL_ID_NONE) {
+      return "NO BAN can only be used during ban phases";
+    }
+
+    if (currentStep.type === 'BAN' && heroId !== SPECIAL_ID_NONE) {
+      const usedHeroes = getUsedHeroIds(state);
+      if (heroId !== SPECIAL_ID_RANDOM && usedHeroes.has(heroId)) return "Hero already used";
+    }
+
+    if (currentStep.type === 'PICK') {
+      const usedHeroes = getUsedHeroIds(state);
+      if (heroId !== SPECIAL_ID_RANDOM && usedHeroes.has(heroId)) return "Hero already used";
+    }
 
     // Fearless Check
     if (heroId && state.draftMode === 'FEARLESS') {
@@ -203,7 +250,17 @@ export const validateMove = (state: DraftState, payload: any): string | null => 
 
   if (state.phase === 'SWAP') {
     if (type === 'SWAP') {
-      if (payload.side !== actorSide) return "Wrong side";
+      if (!isSide(payload.side)) return "Invalid swap side";
+      if (actorRole !== 'REFEREE' && payload.side !== actorSide) return "Wrong side";
+      const { fromIndex, toIndex } = payload.swapData || {};
+      if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return "Invalid swap indexes";
+      if (fromIndex < 0 || fromIndex > 4 || toIndex < 0 || toIndex > 4) return "Swap indexes out of range";
+      if (fromIndex === toIndex) return "Choose two different positions";
+      const picks = payload.side === 'BLUE' ? state.bluePicks : state.redPicks;
+      if (!picks[fromIndex] || !picks[toIndex]) return "Both swap positions must have heroes";
+      return null;
+    }
+    if (type === 'FINISH_SWAP') {
       return null;
     }
   }
@@ -212,7 +269,13 @@ export const validateMove = (state: DraftState, payload: any): string | null => 
 };
 
 const reduceState = (state: DraftState, action: DraftAction): DraftState => {
-  const newState = { ...state };
+  const newState: DraftState = {
+    ...state,
+    teamA: { ...state.teamA },
+    teamB: { ...state.teamB },
+    sides: { ...state.sides },
+    seriesHistory: [...(state.seriesHistory || [])],
+  };
   newState.lastActionSeq = action.seq;
 
   switch (action.type) {
@@ -238,22 +301,22 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
       const winner = action.payload.winner as TeamId;
       if (winner === 'TEAM_A') newState.teamA.wins++;
       else newState.teamB.wins++;
-      
+
       const gameRecord: GameResultSnapshot = {
         gameIdx: state.currentGameIdx,
         winner,
         blueSideTeam: state.sides.TEAM_A === 'BLUE' ? 'TEAM_A' : 'TEAM_B',
         redSideTeam: state.sides.TEAM_A === 'RED' ? 'TEAM_A' : 'TEAM_B',
-        blueBans: state.blueBans,
-        redBans: state.redBans,
-        bluePicks: state.bluePicks,
-        redPicks: state.redPicks
+        blueBans: [...state.blueBans],
+        redBans: [...state.redBans],
+        bluePicks: [...state.bluePicks],
+        redPicks: [...state.redPicks]
       };
-      newState.seriesHistory = [...(state.seriesHistory || []), gameRecord];
+      newState.seriesHistory = [...newState.seriesHistory, gameRecord];
 
       let isSeriesOver = false;
       const winsNeeded = Math.ceil(parseInt(state.seriesMode.replace('BO', '')) / 2);
-      
+
       if (state.seriesMode === 'BO2') {
         if (state.currentGameIdx >= 2) isSeriesOver = true;
       } else {
@@ -270,12 +333,12 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
         newState.bluePicks = []; newState.redPicks = [];
         newState.blueReady = false; newState.redReady = false;
         newState.stepEndsAt = 0;
-        
+
         const loser = winner === 'TEAM_A' ? 'TEAM_B' : 'TEAM_A';
         newState.nextSideSelector = loser;
         newState.sides = { TEAM_A: null, TEAM_B: null };
       } else {
-        newState.nextSideSelector = null; 
+        newState.nextSideSelector = null;
       }
       break;
 
@@ -303,7 +366,7 @@ const reduceState = (state: DraftState, action: DraftAction): DraftState => {
       if (action.side === 'BLUE') newState.blueBans = [...newState.blueBans, action.heroId!];
       else newState.redBans = [...newState.redBans, action.heroId!];
       newState.draftStepIndex++;
-      break; 
+      break;
     case 'PICK':
       if (action.side === 'BLUE') newState.bluePicks = [...newState.bluePicks, action.heroId!];
       else newState.redPicks = [...newState.redPicks, action.heroId!];
@@ -340,40 +403,40 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
   const nextSeq = state.lastActionSeq + 1;
 
   if (['START_GAME', 'RESET_GAME', 'TOGGLE_READY', 'PAUSE_GAME', 'RESUME_GAME', 'SET_SIDES', 'REPORT_RESULT'].includes(payload.type)) {
-      action = { 
+      action = {
         seq: nextSeq,
-        stepIndex: state.stepIndex, 
-        type: payload.type, 
+        stepIndex: state.stepIndex,
+        type: payload.type,
         actorRole: payload.actorRole,
-        side: payload.side, 
+        side: payload.side,
         reason: payload.reason,
-        payload: payload 
+        payload: payload
       };
-  } 
+  }
   else if (state.status === 'RUNNING' && !state.paused) {
       const currentStep = getCurrentStep(state);
-      
+
       if (state.phase === 'DRAFT') {
         if (currentStep) {
             let resolvedHeroId = payload.heroId;
             if (resolvedHeroId === SPECIAL_ID_RANDOM) {
-                const usedHeroes = new Set([...state.blueBans, ...state.redBans, ...state.bluePicks, ...state.redPicks]);
+                const usedHeroes = getUsedHeroIds(state);
                 // Fearless Random Logic
                 const fearlessBans = getFearlessBannedIds(state);
-                
+
                 const available = HERO_IDS.filter(id => !usedHeroes.has(id) && !fearlessBans.has(id));
                 if (available.length > 0) {
                   const randomIndex = Math.floor(Math.random() * available.length);
                   resolvedHeroId = available[randomIndex];
                 } else {
-                  resolvedHeroId = SPECIAL_ID_NONE; 
+                  resolvedHeroId = SPECIAL_ID_NONE;
                 }
             }
             action = {
               seq: nextSeq,
               stepIndex: state.stepIndex,
               heroId: resolvedHeroId,
-              side: currentStep.side, 
+              side: currentStep.side,
               type: currentStep.type,
               actorRole: payload.actorRole
             };
@@ -384,7 +447,7 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
             seq: nextSeq,
             stepIndex: state.stepIndex,
             type: 'SWAP',
-            side: payload.side, 
+            side: payload.side,
             swapData: payload.swapData,
             actorRole: payload.actorRole
           };
@@ -397,7 +460,7 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
   if (!action) return state;
 
   const newState = reduceState(state, action);
-  
+
   if (action.type === 'PAUSE_GAME') {
       if (!state.paused) newState.pausedAt = now;
       else newState.pausedAt = state.pausedAt;
@@ -410,7 +473,7 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
       if (action.type === 'START_GAME') {
           newState.stepEndsAt = now + STEP_DURATION_MS;
       } else if (state.phase === 'DRAFT' && newState.phase === 'SWAP') {
-          newState.stepEndsAt = now + STEP_DURATION_MS; 
+          newState.stepEndsAt = now + STEP_DURATION_MS;
       } else if (newState.phase === 'DRAFT') {
           newState.stepEndsAt = now + STEP_DURATION_MS;
       } else {
@@ -425,8 +488,8 @@ export const applyAction = (state: DraftState, payload: any, now: number): Draft
   return newState;
 };
 
-export const replay = (history: DraftAction[], now: number): DraftState => {
-    let state = { ...INITIAL_STATE }; 
+export const replay = (history: DraftAction[], now: number, baseState: DraftState = INITIAL_STATE): DraftState => {
+    let state = createReplayBase(baseState);
     for (const action of history) {
         state = reduceState(state, action);
     }

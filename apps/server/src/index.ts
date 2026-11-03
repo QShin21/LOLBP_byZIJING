@@ -1,18 +1,21 @@
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { parse } from 'url';
-import { 
-  DraftState, 
-  INITIAL_STATE, 
-  applyAction, 
+import {
+  DraftState,
+  INITIAL_STATE,
+  applyAction,
+  createReplayBase,
   validateMove,
-  replay, 
-  SPECIAL_ID_RANDOM, 
-  STEP_DURATION_MS 
+  replay,
+  SPECIAL_ID_RANDOM,
 } from './game';
-import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions } from './db';
+import { getRoomState, saveRoomState, saveActionAndUpdateState, getRoomActions, replaceRoomActionsAndState } from './db';
 
-const PORT = 8080;
+const PORT = Number(process.env.PORT || 8080);
+const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+const SERIES_MODES = new Set(['BO1', 'BO2', 'BO3', 'BO5']);
+const DRAFT_MODES = new Set(['STANDARD', 'FEARLESS']);
 
 interface Room {
   id: string;
@@ -23,31 +26,49 @@ interface Room {
 
 const rooms = new Map<string, Room>();
 
+const normalizeRoomId = (roomId: string | null | undefined): string | null => {
+  const normalized = (roomId || '').trim();
+  return ROOM_ID_PATTERN.test(normalized) ? normalized : null;
+};
+
+const cleanText = (value: unknown, fallback: string, maxLength = 40): string => {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return (text || fallback).slice(0, maxLength);
+};
+
+const normalizeInitialConfig = (config: any = {}) => ({
+  matchTitle: cleanText(config.matchTitle, 'Exhibition Match', 80),
+  seriesMode: SERIES_MODES.has(config.seriesMode) ? config.seriesMode : 'BO1',
+  draftMode: DRAFT_MODES.has(config.draftMode) ? config.draftMode : 'STANDARD',
+  teamA: cleanText(config.teamA, 'Team A'),
+  teamB: cleanText(config.teamB, 'Team B'),
+});
+
 const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
   let room = rooms.get(roomId);
-  
+
   if (!room) {
     const persistedState = getRoomState(roomId);
-    
+
     if (persistedState) {
       console.log(`Restored room from Disk: ${roomId}`);
-      
+
       // FIX: 深度防御性合并。防止旧数据缺少字段导致前端白屏。
       const safeState: DraftState = {
-        ...INITIAL_STATE, 
+        ...INITIAL_STATE,
         ...persistedState,
-        
+
         teamA: persistedState.teamA || { name: 'Team A', wins: 0 },
         teamB: persistedState.teamB || { name: 'Team B', wins: 0 },
         sides: persistedState.sides || { TEAM_A: null, TEAM_B: null },
         seriesHistory: Array.isArray(persistedState.seriesHistory) ? persistedState.seriesHistory : [],
-        
+
         matchTitle: persistedState.matchTitle || '',
         seriesMode: persistedState.seriesMode || 'BO1',
         draftMode: persistedState.draftMode || 'STANDARD',
         status: persistedState.status || 'NOT_STARTED',
         phase: persistedState.phase || 'DRAFT',
-        
+
         blueBans: persistedState.blueBans || [],
         redBans: persistedState.redBans || [],
         bluePicks: persistedState.bluePicks || [],
@@ -81,29 +102,30 @@ const getOrCreateRoom = (roomId: string, initialConfig?: any): Room => {
         clients: new Set(),
         lastActivity: Date.now()
       };
-      
+
       // 将清洗后的干净状态写回磁盘
       saveRoomState(roomId, safeState);
-      
+
     } else {
       console.log(`Creating new room: ${roomId}`);
-      const initialState: DraftState = { 
-        ...INITIAL_STATE, 
-        status: 'NOT_STARTED', 
-        blueReady: false, 
-        redReady: false, 
-        paused: false, 
+      const config = normalizeInitialConfig(initialConfig);
+      const initialState: DraftState = {
+        ...INITIAL_STATE,
+        status: 'NOT_STARTED',
+        blueReady: false,
+        redReady: false,
+        paused: false,
         stepEndsAt: 0,
         lastActionSeq: 0,
-        
-        matchTitle: initialConfig?.matchTitle || 'Exhibition Match',
-        seriesMode: initialConfig?.seriesMode || 'BO1',
-        draftMode: initialConfig?.draftMode || 'STANDARD', 
-        teamA: { name: initialConfig?.teamA || 'Team A', wins: 0 },
-        teamB: { name: initialConfig?.teamB || 'Team B', wins: 0 },
+
+        matchTitle: config.matchTitle,
+        seriesMode: config.seriesMode,
+        draftMode: config.draftMode,
+        teamA: { name: config.teamA, wins: 0 },
+        teamB: { name: config.teamB, wins: 0 },
         sides: { TEAM_A: null, TEAM_B: null },
       };
-      
+
       room = {
         id: roomId,
         state: initialState,
@@ -122,7 +144,7 @@ const broadcastToRoom = (room: Room) => {
     type: 'STATE_SYNC',
     payload: room.state
   });
-  
+
   room.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
@@ -139,16 +161,22 @@ const server = createServer((req, res) => {
 
   const url = parse(req.url || '', true);
 
+  if (req.method === 'GET' && url.pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, rooms: rooms.size }));
+    return;
+  }
+
   // API: Create new room
   if (req.method === 'POST' && url.pathname === '/rooms') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const config = JSON.parse(body || '{}');
+        const config = normalizeInitialConfig(JSON.parse(body || '{}'));
         const roomId = Math.random().toString(36).substring(2, 8);
-        
-        getOrCreateRoom(roomId, config); 
+
+        getOrCreateRoom(roomId, config);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ roomId }));
@@ -162,7 +190,12 @@ const server = createServer((req, res) => {
 
   // API: Get missing actions
   if (req.method === 'GET' && url.pathname?.match(/^\/rooms\/[a-zA-Z0-9]+\/actions$/)) {
-    const roomId = url.pathname.split('/')[2];
+    const roomId = normalizeRoomId(url.pathname.split('/')[2]);
+    if (!roomId) {
+      res.writeHead(400);
+      res.end('Invalid room id');
+      return;
+    }
     const afterSeq = parseInt(url.query.afterSeq as string || '0', 10);
     const missingActions = getRoomActions(roomId, afterSeq);
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -178,21 +211,25 @@ const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
   const urlParams = new URLSearchParams(parse(req.url || '').query || '');
-  const roomId = urlParams.get('room') || 'default';
+  const roomId = normalizeRoomId(urlParams.get('room'));
+  if (!roomId) {
+    ws.close(1008, 'Invalid room id');
+    return;
+  }
   const room = getOrCreateRoom(roomId);
-  
+
   room.clients.add(ws);
-  
+
   ws.send(JSON.stringify({ type: 'STATE_SYNC', payload: room.state }));
 
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
       room.lastActivity = Date.now();
-      
+
       if (data.type === 'ACTION_SUBMIT' || data.type === 'TOGGLE_READY') {
-        const payload = data.type === 'TOGGLE_READY' 
-          ? { ...data.payload, type: 'TOGGLE_READY' } 
+        const payload = data.type === 'TOGGLE_READY'
+          ? { ...data.payload, type: 'TOGGLE_READY' }
           : data.payload;
 
         const error = validateMove(room.state, payload);
@@ -203,7 +240,7 @@ wss.on('connection', (ws, req) => {
 
         const now = Date.now();
         const newState = applyAction(room.state, payload, now);
-        
+
         const newAction = newState.history[newState.history.length - 1];
         if (newAction) saveActionAndUpdateState(roomId, newAction, newState);
         else saveRoomState(roomId, newState);
@@ -211,20 +248,30 @@ wss.on('connection', (ws, req) => {
         room.state = newState;
         broadcastToRoom(room);
       }
-      
+
       if (data.type === 'ACTION_UNDO') {
+        if (data.payload?.actorRole !== 'REFEREE') {
+          ws.send(JSON.stringify({ type: 'ACTION_REJECTED', payload: { reason: 'Only Referee can undo' } }));
+          return;
+        }
         if (room.state.history.length > 0) {
            const newHistory = room.state.history.slice(0, -1);
-           const newState = replay(newHistory, Date.now());
-           saveRoomState(roomId, newState);
+           const newState = replay(newHistory, Date.now(), createReplayBase(room.state));
+           replaceRoomActionsAndState(roomId, newHistory, newState);
            room.state = newState;
            broadcastToRoom(room);
         }
       }
-      
+
       if (data.type === 'ACTION_RESET') {
+          if (data.payload?.actorRole !== 'REFEREE') {
+            ws.send(JSON.stringify({ type: 'ACTION_REJECTED', payload: { reason: 'Only Referee can reset' } }));
+            return;
+          }
           const newState = applyAction(room.state, { type: 'RESET_GAME', actorRole: 'REFEREE' }, Date.now());
-          saveRoomState(roomId, newState);
+          const newAction = newState.history[newState.history.length - 1];
+          if (newAction) saveActionAndUpdateState(roomId, newAction, newState);
+          else saveRoomState(roomId, newState);
           room.state = newState;
           broadcastToRoom(room);
       }
@@ -243,8 +290,8 @@ setInterval(() => {
   const now = Date.now();
   rooms.forEach((room) => {
     if (room.state.paused) return;
-    if (room.state.status !== 'RUNNING') return; 
-    
+    if (room.state.status !== 'RUNNING') return;
+
     if (now > room.state.stepEndsAt && room.state.stepEndsAt > 0) {
       let newState = room.state;
       if (room.state.phase === 'DRAFT') {

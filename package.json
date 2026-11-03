@@ -7,7 +7,11 @@
     "apps/server"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace=apps/server\" \"npm run dev --workspace=apps/web\""
+    "dev": "concurrently \"npm run dev --workspace=apps/server\" \"npm run dev --workspace=apps/web\"",
+    "build": "npm run build --workspace=apps/web && npx tsc -p apps/server/tsconfig.json --noEmit",
+    "lint": "npm run lint --workspace=apps/web",
+    "test": "npm test --workspace=apps/server",
+    "audit": "npm audit --audit-level=moderate"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
